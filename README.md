@@ -9,10 +9,10 @@
 </div>
 
 <p align="center">
-  <img src="docs/media/safeframe-demo.gif" alt="SafeFrame in action: a family video is uploaded, analysed, and the child is blurred while both adults stay visible. The user reviews the result and exports a safe copy." width="800">
+  <img src="docs/media/safeframe-demo.gif" alt="SafeFrame's review screen: a woman and a child walk down a park path; the child is blurred to their silhouette while the woman stays visible, with per-person Blur/Keep controls beside the video." width="800">
   <br>
-  <sub><i>Upload → automatic analysis → human review → safe video ready to share.<br>
-  The child is blurred, the two adults stay visible. Demo uses free stock footage from <a href="https://mixkit.co/free-stock-video/child-blowing-on-a-huge-dandelion-with-her-parents-46049/">Mixkit</a>.</i></sub>
+  <sub><i>The review step: the child is blurred to their silhouette, the adult stays visible,<br>
+  and every decision can be changed before the safe video is exported.</i></sub>
 </p>
 
 ---
