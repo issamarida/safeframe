@@ -58,7 +58,10 @@ export function ReviewScreen({ job, config, initial, onRender, onDiscard }: Prop
   }, [job.id]);
 
   const policy: Policy = useMemo(() => ({ threshold, minFaceSamples }), [threshold, minFaceSamples]);
-  const tracks = useMemo(() => indexTracks(analysis?.tracks ?? []), [analysis]);
+  const tracks = useMemo(
+    () => indexTracks(analysis?.tracks ?? [], analysis?.video),
+    [analysis],
+  );
   const summary = useMemo(() => summarise(tracks, policy, overrides), [tracks, policy, overrides]);
   const video = analysis?.video ?? job.video!;
   const lastFrame = Math.max(video.frame_count - 1, 0);
@@ -283,6 +286,11 @@ export function ReviewScreen({ job, config, initial, onRender, onDiscard }: Prop
           <span className="dot minor" /> likely minor <span className="dot uncertain" /> uncertain{" "}
           <span className="dot kept" /> kept <span className="dot manual" /> manual · dashed outline =
           interpolated through occlusion · keys: space, ←/→, shift+←/→
+        </p>
+        <p className="legend small muted">
+          People are blurred to their silhouette when the model outlined them, and to their whole
+          box on frames without a reliable outline. This preview is drawn over the original video
+          in your browser; only the exported file has the blur baked in.
         </p>
       </div>
 

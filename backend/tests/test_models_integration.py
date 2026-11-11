@@ -94,3 +94,44 @@ def test_pipeline_on_real_models(adults_clip, tmp_path):
     src, dst = probe(adults_clip), probe(out)
     assert (dst.width, dst.height, dst.fps_rational) == (src.width, src.height, src.fps_rational)
     assert dst.has_audio
+
+    # The default checkpoint segments people: the two full-length tracks carry
+    # silhouettes on most frames, each inside (or near) its own box.
+    for track in full_length:
+        assert len(track.masks) >= 0.8 * frames, (track.track_id, len(track.masks))
+        for f, mask in track.masks.items():
+            box = track.boxes[f]
+            cx = mask.x + mask.width / 2
+            assert box.x1 - 30 <= cx <= box.x2 + 30
+            assert mask.decode().any()
+
+
+def test_silhouettes_are_tracked_and_box_only_models_still_work(adults_clip):
+    from safeframe.pipeline.analyze import analyze_video
+    from safeframe.pipeline.detection import DEFAULT_YOLO_WEIGHTS, YoloPersonTracker
+    from safeframe.pipeline.factory import ModelBundle
+    from safeframe.video.io import iter_frames
+
+    assert DEFAULT_YOLO_WEIGHTS.endswith("-seg.pt")
+    tracker = YoloPersonTracker()
+    with_mask = 0
+
+    for index, frame in iter_frames(adults_clip):
+        for obs in tracker.update(frame):
+            if obs.mask is not None:
+                with_mask += 1
+                h, w = frame.shape[:2]
+                assert obs.mask.x + obs.mask.width <= w and obs.mask.y + obs.mask.height <= h
+        if index >= 10:
+            break
+    assert with_mask >= 10
+
+    # A legacy detection checkpoint gives boxes only (rectangular fallback).
+    bundle = ModelBundle()
+    result = analyze_video(
+        adults_clip,
+        YoloPersonTracker("yolo11n.pt"),
+        bundle.new_face_detector(),
+        bundle.age_estimator(),
+    )
+    assert result.analysis.tracks and result.analysis.mask_count == 0

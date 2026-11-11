@@ -47,6 +47,9 @@ make test           # backend + frontend test suites
 make dev            # API on :8000 and UI on :5173
 ```
 
+See [docs/DEVELOPMENT.md](docs/DEVELOPMENT.md) for the code layout, key defaults
+and testing notes.
+
 ## Data handling
 
 SafeFrame exists to protect children, so the repository is held to a strict standard:

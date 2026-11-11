@@ -9,6 +9,8 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass, field
 from enum import StrEnum
 
+from safeframe.pipeline.masks import WIRE_KEY, Budget, Mask, load_track_masks
+
 
 @dataclass(frozen=True, slots=True)
 class Box:
@@ -70,6 +72,9 @@ class PersonObservation:
     track_id: int
     box: Box
     confidence: float
+    # Final protected coverage for this person in this frame, or None when the
+    # model gave no usable silhouette (the box is then used instead).
+    mask: Mask | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -102,6 +107,9 @@ class Track:
     # frame index -> box. Includes interpolated frames after smoothing.
     boxes: dict[int, Box] = field(default_factory=dict)
     interpolated: set[int] = field(default_factory=set)
+    # Sparse frame index -> silhouette coverage, only on observed frames. A
+    # frame with a box but no mask is blurred with the padded box.
+    masks: dict[int, Mask] = field(default_factory=dict)
     samples: list[AgeSample] = field(default_factory=list)
     p_minor: float | None = None
     expected_age: float | None = None
@@ -115,8 +123,14 @@ class Track:
     def last_frame(self) -> int:
         return max(self.boxes)
 
+    def mask_for(self, frame: int) -> Mask | None:
+        """Silhouette for ``frame``, only where the box there was actually observed."""
+        if frame in self.interpolated:
+            return None
+        return self.masks.get(frame)
+
     def to_dict(self) -> dict:
-        return {
+        data = {
             "track_id": self.track_id,
             "first_frame": self.first_frame,
             "last_frame": self.last_frame,
@@ -131,14 +145,34 @@ class Track:
             ],
             "samples": [asdict(s) for s in self.samples],
         }
+        masks = [
+            self.masks[f].to_row(f)
+            for f in sorted(self.masks)
+            if f in self.boxes and f not in self.interpolated
+        ]
+        if masks:
+            data[WIRE_KEY] = masks
+        return data
 
     @classmethod
-    def from_dict(cls, data: dict) -> Track:
+    def from_dict(
+        cls,
+        data: dict,
+        frame_size: tuple[int, int] | None = None,
+        budget: Budget | None = None,
+    ) -> Track:
+        """Load a track. Masks are read only when ``frame_size`` (width, height)
+        is known; invalid or over-budget mask entries are dropped (box fallback)."""
         track = cls(track_id=int(data["track_id"]))
         for f, x1, y1, x2, y2, interp in data["boxes"]:
             track.boxes[int(f)] = Box(x1, y1, x2, y2)
             if interp:
                 track.interpolated.add(int(f))
+        if frame_size is not None and WIRE_KEY in data:
+            observed = set(track.boxes) - track.interpolated
+            track.masks = load_track_masks(
+                data[WIRE_KEY], observed, frame_size[0], frame_size[1], budget or Budget()
+            )
         track.samples = [AgeSample(**s) for s in data.get("samples", [])]
         track.p_minor = data.get("p_minor")
         track.expected_age = data.get("expected_age")
@@ -213,8 +247,16 @@ class Analysis:
 
     @classmethod
     def from_dict(cls, data: dict) -> Analysis:
+        video = VideoInfo.from_dict(data["video"])
+        budget = Budget()  # one run budget shared by every track, in file order
         return cls(
-            video=VideoInfo.from_dict(data["video"]),
-            tracks=[Track.from_dict(t) for t in data["tracks"]],
+            video=video,
+            tracks=[
+                Track.from_dict(t, (video.width, video.height), budget) for t in data["tracks"]
+            ],
             settings=data.get("settings", {}),
         )
+
+    @property
+    def mask_count(self) -> int:
+        return sum(len(t.masks) for t in self.tracks)
