@@ -8,12 +8,12 @@
 
 </div>
 
-<!--
-  BEFORE / AFTER GIF GOES HERE.
-  Save the file as docs/media/before-after.gif and replace this comment with:
-  <p align="center"><img src="docs/media/before-after.gif" alt="The same video before and after SafeFrame: children are blurred, adults stay visible" width="720"></p>
-  Use stock or consented footage only, never real children without permission.
--->
+<p align="center">
+  <img src="docs/media/safeframe-demo.gif" alt="SafeFrame in action: a family video is uploaded, analysed, and the child is blurred while both adults stay visible. The user reviews the result and exports a safe copy." width="800">
+  <br>
+  <sub><i>Upload → automatic analysis → human review → safe video ready to share.<br>
+  The child is blurred, the two adults stay visible. Demo uses free stock footage from <a href="https://mixkit.co/free-stock-video/child-blowing-on-a-huge-dandelion-with-her-parents-46049/">Mixkit</a>.</i></sub>
+</p>
 
 ---
 
@@ -243,7 +243,7 @@ possible today.
 2. AVG Technologies, *Digital Birth* study of 2,200 mothers in 10 countries (2010). [PCWorld coverage](https://www.pcworld.com/article/503775/nine_of_ten_us_kids_have_online_presence_by_age_two_study.html)
 3. C.S. Mott Children's Hospital, *National Poll on Children's Health: Parents on social media* (2015). [mottpoll.org (PDF)](https://www.mottpoll.org/sites/default/files/documents/031615_sharenting_0.pdf)
 4. Hiniker, Schoenebeck & Kientz, *Not at the Dinner Table: Parents' and Children's Perspectives on Family Technology Rules*, University of Washington and University of Michigan, 249 families (2016). [ScienceDaily](https://www.sciencedaily.com/releases/2016/03/160308135122.htm)
-5. Barclays forecast on "sharenting" and identity fraud (2018). [4NI coverage](https://www.4ni.co.uk/northern-ireland-news/244952/sharenting-major-risk-to-children-s-future-financial-security)
+5. Barclays forecast on "sharenting" and identity fraud (2018). [4NI coverage](https://www.4ni.co.uk/northern-ireland-news/244952)
 6. General Data Protection Regulation (EU) 2016/679, Recital 38. [gdpr-info.eu](https://gdpr-info.eu/recitals/no-38/)
 7. French Law No. 2024-120 of 19 February 2024 on children's image rights. [Bird & Bird summary](https://www.twobirds.com/en/insights/2024/france/new-legal-framework-for-childrens-privacy)
 8. UN Convention on the Rights of the Child, Article 16. [ohchr.org](https://www.ohchr.org/en/instruments-mechanisms/instruments/convention-rights-child)
