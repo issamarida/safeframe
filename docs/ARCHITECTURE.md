@@ -27,9 +27,10 @@ sequenceDiagram
     API->>API: ffprobe validation
     API->>Worker: queue analysis
     Worker->>Worker: preview proxy (H.264 ≤720p, CFR)
-    Worker->>Worker: YOLO-seg + BoT-SORT + YuNet + ViT  →  analysis.json (boxes + masks), thumbnails
+    Worker->>Worker: YOLO-seg + BoT-SORT + YuNet + ViT  →  analysis.json (boxes), masks.sfm, thumbnails
     UI-->>API: GET /events (SSE progress)
     UI->>API: GET /analysis, /preview, /thumbnail
+    UI->>API: GET /masks?start&end (silhouettes near the playhead)
     Note over UI: Review: threshold, overrides, manual regions.<br/>Live preview uses the same policy as the renderer.
     UI->>API: POST /render {threshold, overrides, manual_regions}
     API->>Worker: queue render
@@ -60,8 +61,8 @@ Per frame:
    `AgeEstimator.estimate(crops)` in one batch → `AgeSample(p_minor,
    expected_age, weight)` appended to the track.
 
-After the last frame, masks are trimmed to the payload budgets (see below),
-samples are aggregated (`policy.aggregate`) and each track
+Silhouettes are streamed to the job's mask store as they are produced (see
+below). After the last frame, samples are aggregated (`policy.aggregate`) and each track
 is smoothed (`smoothing.smooth_track`): gaps ≤ 1.5 s are linearly interpolated,
 and the first/last box is held for 0.25 s. Those synthetic frames get boxes
 only: a silhouette is never copied to a new position or interpolated.
@@ -99,29 +100,53 @@ clipped to the box.
 the box grown by 15 %; IoU(mask extent, box) ≥ 0.3; ≤ 8 192 runs. Valid
 geometry does not prove the person is fully covered.
 
-**Wire format** (`masks_v1` on each track; `boxes` unchanged):
+**Mask geometry** (shared by the store and the legacy inline `masks_v1` field):
 `[frame, x, y, width, height, runs]`, integer source pixels, half-open crop,
 row-major run lengths alternating background/foreground starting with
 background (first run may be 0, later runs > 0), summing to `width × height`.
 Holes and disconnected parts are preserved.
 
-**Loading** (`Track.from_dict`, mirrored in `frontend/src/review/model.ts`):
-rows are validated (shape, integer types, bounds, run count before summing,
-exact sum) before anything area-sized is allocated. A row is used only for a
-frame with an *observed* box; a frame listed twice is ambiguous and uses the
-box. Budgets: 8 192 runs per mask, 1.5 M per track, 4 M per analysis, applied
-in file order; once a budget is exceeded every later mask in that scope is
-dropped. Invalid entries become missing, never fatal. The API re-serialises
-the validated model (gzip when accepted), so the UI receives exactly what the
-renderer will use. Masks live inside `analysis.json` and share its job
-lifetime, access rules and deletion; they are never logged.
+**Mask store** (`pipeline/maskstore.py`, format `sfm1`). Inline JSON costs
+~4 KB per person-frame (a 15 s, 4-person clip was 6.5 MB), so masks are kept
+in a binary sidecar instead: a header with a random store id, the runs of each
+mask as LEB128 varints (~1.2 KB per mask), then a fixed-size index sorted by
+`(frame, track_id)` (44 bytes per entry) and a footer. The analysis JSON links
+it with `mask_store: {"format": "sfm1", "file": "<basename>", "id", "entries"}`;
+only a bare file name next to the analysis is accepted.
 
-**Payload.** A person mask costs about 1 000 runs (~4 KB of JSON). Measured:
-a 15 s, 4-person, 810×900 clip produced 6.5 MB of JSON (0.8 MB gzipped) versus
-65 KB box-only. The budgets therefore cap the inline payload at roughly 20 MB,
-which corresponds to about 4 000 silhouette person-frames per video; frames
-beyond that use the padded box. Moving masks to a bounded, frame-addressable
-store would remove that cap.
+- *Writing.* `MaskStoreWriter` appends during analysis into
+  `masks.sfm.partial` and renames it on success; failure or cancellation
+  deletes the partial file. Budgets: 1 GiB per store, 1 M entries, 64 masks per
+  frame, 8 192 runs per mask. Once a budget is hit every later mask uses the
+  box (sticky, so the outcome does not depend on later mask sizes).
+- *Reading.* `MaskStoreReader` checks magic, store id, footer and file size,
+  requires the index to be strictly sorted (an unsorted or duplicate entry
+  rejects the whole store), then drops entries that are out of bounds, on an
+  unknown track, not on an observed box frame, or past the per-frame cap.
+  Payloads are decoded and checked (exact varint count, positive runs, exact
+  sum) only when a frame is requested; a bad payload makes that one mask
+  missing. Render reads frame by frame; nothing holds every mask in memory.
+- *Serving.* `GET /api/jobs/{id}/masks?start&end` returns validated rows
+  (`masks_v1` geometry) grouped by track for at most 256 frames and 1 M runs,
+  cut on a frame boundary; the response's `end` says where to continue.
+  `GET /analysis` only reports `mask_store: {format, entries}`.
+- *Measured* (synthetic, one hour of 4 people at 25 fps, 360 000 masks):
+  406 MiB store, 0.28 s to open and validate the index (+20 MiB RSS), ~6 ms
+  per frame to read 4 masks during render, 86 ms per 64-frame range
+  (812 KiB JSON before gzip). The 1 GiB budget is about 2.5 hours of four
+  people; beyond it frames use the padded box.
+- *Retention.* `masks.sfm` lives in the job directory, is deleted with the
+  job, by the sweeper, and together with the upload, preview and thumbnails
+  after a successful export. The CLI writes it next to the analysis
+  (`analysis.json` → `analysis.masks`); `process` uses a temporary directory.
+  Masks are never logged.
+
+**Legacy inline masks.** `Track.from_dict` still reads the `masks_v1` list on
+each track (mirrored in `frontend/src/review/model.ts`): rows are validated
+before anything area-sized is allocated, used only on observed box frames,
+duplicates use the box, and budgets of 1.5 M runs per track and 4 M per
+analysis apply in file order. `analyze_video` without a store writer keeps
+masks inline within those budgets (used by tests).
 
 All three components are `Protocol`s (`pipeline/interfaces.py`). Tests inject
 scripted fakes, so the full pipeline — including FFmpeg encoding — is tested in
@@ -162,7 +187,12 @@ output, and a web job returns to review with the error.
 
 ### Review preview (`frontend/src/components/VideoStage.tsx`)
 
-The canvas overlay picks the same mask-or-box per frame as the renderer. For a
+The canvas overlay picks the same mask-or-box per frame as the renderer.
+`review/masks.ts` (`MaskChunkCache`) fetches 64-frame chunks around the
+playhead (and the next chunk), continues truncated responses, re-validates
+every row against the frame size and observed box frames, and keeps at
+most 16 chunks. Until a chunk arrives, or if it fails, those frames are
+previewed with the padded box, which is never less coverage than the export. For a
 silhouette it rasterises the mask to preview pixels using separate x/y ratios
 and a conservative rule (a preview pixel is covered if any covered source
 pixel touches it; no partial alpha), draws the blurred video into an offscreen
@@ -187,7 +217,7 @@ ffmpeg -f rawvideo -pix_fmt bgr24 -s WxH -framerate <exact rational> -i pipe:0
   (no multipart temp files in shared `/tmp`), with the size limit enforced while
   streaming.
 - A single worker thread runs analysis and renders sequentially (they share the GPU).
-- After a successful render, `upload`, `preview.mp4` and `thumbs/` are deleted
+- After a successful render, `upload`, `preview.mp4`, `masks.sfm` and `thumbs/` are deleted
   unless the user opted to keep the upload.
 - `DELETE /api/jobs/{id}` cancels any running work and removes the directory.
 - A sweeper deletes jobs idle for longer than `SAFEFRAME_JOB_TTL_HOURS`

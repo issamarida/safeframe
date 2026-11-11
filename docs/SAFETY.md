@@ -85,7 +85,10 @@ shows the person's shape.
 - Masks that are empty, tiny, implausibly small for the box, far from the box,
   over-fragmented or malformed are discarded, and that frame falls back to the
   padded rectangle. So do interpolated gaps, padded track ends, frames beyond
-  the payload budget and any frame without a mask: a silhouette is never guessed.
+  the mask store's budget (about 2.5 hours of four people), entries in a
+  corrupted or mismatched store, and any frame without a mask: a silhouette is
+  never guessed. The review preview also uses the box until silhouettes for
+  the current frames have loaded.
 - If a planned region has neither a usable mask nor a valid box, the export
   fails instead of writing that frame unprotected.
 - The review preview applies the same mask-or-box choice and labels each
@@ -99,9 +102,11 @@ shows the person's shape.
   synthetic clips it found slightly fewer person-frames at the frame edge
   (e.g. 150 vs 160 on one clip, missing a partly visible third person), so
   minor recall must be re-measured on the labelled evaluation set.
-- Masks are derived personal data. They live only in the job's
-  `analysis.json`, under the same retention and deletion rules, and are never
-  logged.
+- Masks are derived personal data. They live only in the job directory
+  (`masks.sfm`), are served only through the job's id like every other job
+  resource, are deleted with the upload, preview and thumbnails after export,
+  with the job, or by the 24 h sweeper, are written atomically (a partial file
+  is removed on failure or cancellation), and are never logged.
 
 ### 7. Misuse
 

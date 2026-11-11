@@ -12,7 +12,8 @@ backend/                     uv project (Python 3.13), package `safeframe`
     pipeline/
       types.py               Box, Track, AgeSample, VideoInfo, Analysis (+ JSON)
       detection.py           YOLO-seg + BoT-SORT person tracker, mask extraction
-      masks.py               silhouette coverage, masks_v1 format, validation, budgets
+      masks.py               silhouette coverage, masks_v1 geometry, validation
+      maskstore.py           on-disk frame-addressable mask store (sfm1)
       botsort_safeframe.yaml tuned tracker config (3 s buffer, ReID)
       faces.py               YuNet face detector, face → person assignment
       age.py                 ViT apparent-age estimator → P(under 18)
@@ -61,7 +62,8 @@ Model weights are cached outside the repository: `~/.cache/safeframe/models`
 | Region padding (box fallback, manual) | 8 % per side | `anonymize.DEFAULT_PADDING` |
 | Person model | `yolo11n-seg.pt` | `models.DEFAULT_YOLO_WEIGHTS` |
 | Silhouette margin | 3 % of longer box side, 3–24 px | `masks.margin_px` |
-| Mask budgets | 8 192 runs/mask, 1.5 M/track, 4 M/analysis | `masks.MAX_RUNS_*` |
+| Mask store budgets | 1 GiB, 1 M masks, 64 per frame, 8 192 runs per mask | `maskstore.MAX_*` |
+| Mask range response | ≤ 256 frames, ≤ 1 M runs | `maskstore.MAX_RANGE_*` |
 | Job expiry | 24 h idle | `SAFEFRAME_JOB_TTL_HOURS` |
 
 ## Keeping the preview honest
@@ -71,9 +73,9 @@ change decision logic in `backend/src/safeframe/pipeline/policy.py`, make the
 same change in `frontend/src/review/model.ts` and update both test files
 (`tests/test_policy.py`, `src/review/model.test.ts`). The same applies to
 region padding (`anonymize.DEFAULT_PADDING` ↔ `PADDING` in `model.ts`) and to
-mask validation and budgets (`pipeline/masks.py` ↔ `parseMaskRow`,
-`indexTracks` and `MAX_RUNS_*` in `model.ts`), so the preview and the export
-choose the same silhouette or box on every frame.
+mask validation (`pipeline/masks.py` and `maskstore.py` ↔ `parseMaskRow`,
+`indexTracks` in `model.ts` and `MaskChunkCache` in `review/masks.ts`), so the
+preview and the export choose the same silhouette or box on every frame.
 
 ## Testing notes
 

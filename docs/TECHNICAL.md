@@ -138,6 +138,11 @@ uv run safeframe analyze holiday.mp4 -o analysis.json
 uv run safeframe render holiday.mp4 analysis.json -o holiday-safe.mp4 --threshold 0.3
 ```
 
+`analyze` also writes the silhouettes to `analysis.masks` next to the JSON.
+Keep the two files together: `render` finds the masks there, and without them
+it blurs whole boxes (with a warning). Older analysis files that carry inline
+`masks_v1` silhouettes or no silhouettes at all still render.
+
 Model weights are downloaded on first use to `~/.cache/safeframe/models`
 (override with `SAFEFRAME_MODEL_DIR`) and the Hugging Face cache; YuNet is
 verified against a pinned SHA-256.
@@ -153,7 +158,8 @@ verified against a pinned SHA-256.
 | `POST /api/jobs?filename=…&keep_upload=false` | Upload a video as the raw request body; starts analysis |
 | `GET /api/jobs/{id}` | Job state, stage and progress |
 | `GET /api/jobs/{id}/events` | Server-sent events stream of job progress |
-| `GET /api/jobs/{id}/analysis` | Tracks with per-frame boxes, optional `masks_v1` silhouettes, P(under 18), face-evidence counts (gzip when accepted) |
+| `GET /api/jobs/{id}/analysis` | Tracks with per-frame boxes, P(under 18), face-evidence counts, and `mask_store` when silhouettes exist |
+| `GET /api/jobs/{id}/masks?start=&end=` | Validated silhouettes for a frame range, grouped by track (bounded; continue from the returned `end`) |
 | `GET /api/jobs/{id}/preview` | Browser-playable preview (supports range requests) |
 | `GET /api/jobs/{id}/tracks/{track}/thumbnail` | Review thumbnail for one person |
 | `POST /api/jobs/{id}/render` | `{threshold, min_face_samples, overrides, manual_regions}`; starts export |
@@ -184,11 +190,9 @@ self-hosted machine; put authentication in front of it before exposing it.
   review the preview, and use a manual region where coverage looks thin. Pass
   `--yolo yolo11n.pt` (or `SAFEFRAME_YOLO_WEIGHTS=yolo11n.pt`) for the old
   rectangle-only behaviour.
-- **Silhouettes on long videos.** Masks are stored inline in the analysis
-  JSON with fixed budgets (about 1 minute of one person per track and about
-  4 000 person-frames per video at typical sizes). Beyond that, frames use the
-  padded rectangle. This is safe but means long or crowded videos get fewer
-  silhouettes; a frame-addressable mask store would lift the limit.
+- **Very long videos.** Silhouettes are kept in an on-disk store capped at
+  1 GiB, about 2.5 hours of four people. Beyond that, frames use the padded
+  rectangle.
 - **Identity switches.** In dense crowds, trackers can swap IDs when people
   cross. Interpolation and padding reduce, but do not eliminate, the effect.
 - **Variable frame rate** input is rendered at its average frame rate.

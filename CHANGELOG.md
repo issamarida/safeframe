@@ -12,14 +12,18 @@ All notable changes to this project are documented here. The format follows
   `yolo11n-seg.pt` (instance segmentation, same tracker and ReID).
   Detection-only checkpoints such as `yolo11n.pt` still work and blur rectangles.
 - Frames without a usable silhouette (interpolated gaps, padded ends, rejected
-  or missing masks, over-budget masks, legacy analyses) fall back to the padded
+  or missing masks, corrupted stores, legacy analyses) fall back to the padded
   rectangle, in both the export and the review preview.
 - Overlapping regions are each computed from the untouched frame, so they no
   longer blur already-blurred pixels.
 
 ### Added
-- Optional `masks_v1` field on each track in the analysis JSON (validated,
-  budgeted run-length encoding); legacy box-only analyses still load and render.
+- Silhouettes are stored in a bounded, frame-addressable on-disk mask store
+  (`masks.sfm` per job, `analysis.masks` next to CLI analyses) and served to
+  the review UI by frame range (`GET /api/jobs/{id}/masks`), so long videos
+  keep silhouettes (about 2.5 hours of four people per 1 GiB store).
+- Analyses with inline `masks_v1` silhouettes, or with boxes only, still load
+  and render.
 - Export fails, leaving no output, if a planned region has neither a usable
   mask nor a valid box.
 - The CLI and job log report silhouette vs. box-fallback person-frames; the
