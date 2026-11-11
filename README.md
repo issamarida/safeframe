@@ -1,6 +1,6 @@
 <div align="center">
 
-# 🛡️ SafeFrame
+# SafeFrame
 
 ### Share your memories — not other people's children.
 
