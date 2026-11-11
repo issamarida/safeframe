@@ -26,6 +26,8 @@ WEIGHT_EXT = {
     ".pt", ".pth", ".onnx", ".engine", ".tflite", ".caffemodel",
     ".safetensors", ".bin", ".ckpt", ".h5", ".pb",
 }
+# Silhouette mask stores outline real people: derived personal data.
+MASK_EXT = {".masks", ".sfm", ".partial"}
 SECRET_NAMES = re.compile(r"(^|/)(\.env(\..+)?|.*\.pem|.*\.key|id_rsa|id_ed25519)$")
 ALLOWED_SECRET_NAMES = {".env.example"}
 
@@ -49,6 +51,9 @@ def problems_for(path: Path) -> list[str]:
         pass  # TypeScript source, not an MPEG transport stream
     elif suffix in FOOTAGE_EXT or suffix == ".ts":
         found.append("video/audio footage must never be committed")
+
+    if suffix in MASK_EXT:
+        found.append("silhouette mask stores are derived from footage and must never be committed")
 
     if suffix in WEIGHT_EXT:
         found.append("model weights must never be committed (they are downloaded at runtime)")

@@ -1,3 +1,4 @@
+import type { MaskRange } from "../review/masks";
 import type { AnalysisData, AppConfig, Job, RenderRequest } from "./types";
 
 const BASE = "/api";
@@ -30,6 +31,8 @@ export const api = {
   config: () => request<AppConfig>("/config"),
   job: (id: string) => request<Job>(`/jobs/${id}`),
   analysis: (id: string) => request<AnalysisData>(`/jobs/${id}/analysis`),
+  masks: (id: string, start: number, end: number) =>
+    request<MaskRange>(`/jobs/${id}/masks?start=${start}&end=${end}`),
   render: (id: string, body: RenderRequest) =>
     request<Job>(`/jobs/${id}/render`, {
       method: "POST",

@@ -23,6 +23,7 @@ import {
 import { Timeline } from "./Timeline";
 import { TrackList } from "./TrackList";
 import { VideoStage, type ViewMode } from "./VideoStage";
+import { MaskChunkCache } from "../review/masks";
 
 interface Props {
   job: Job;
@@ -61,6 +62,13 @@ export function ReviewScreen({ job, config, initial, onRender, onDiscard }: Prop
   const tracks = useMemo(
     () => indexTracks(analysis?.tracks ?? [], analysis?.video),
     [analysis],
+  );
+  const masks = useMemo(
+    () =>
+      analysis?.mask_store
+        ? new MaskChunkCache((s, e) => api.masks(job.id, s, e), tracks, analysis.video)
+        : null,
+    [analysis, tracks, job.id],
   );
   const summary = useMemo(() => summarise(tracks, policy, overrides), [tracks, policy, overrides]);
   const video = analysis?.video ?? job.video!;
@@ -232,6 +240,7 @@ export function ReviewScreen({ job, config, initial, onRender, onDiscard }: Prop
           src={api.previewUrl(job.id)}
           video={video}
           tracks={tracks}
+          masks={masks}
           policy={policy}
           overrides={overrides}
           manual={manual}

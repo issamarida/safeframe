@@ -9,6 +9,7 @@ import pytest
 
 from safeframe.pipeline.analyze import AnalysisSettings, analyze_video
 from safeframe.pipeline.interfaces import Cancelled
+from safeframe.pipeline.maskstore import MaskStoreReader, MaskStoreWriter
 from safeframe.pipeline.policy import DecisionPolicy, Override
 from safeframe.pipeline.render import RenderError, plan_render, render_video
 from safeframe.pipeline.types import Analysis, Box, ManualRegion, TrackStatus
@@ -201,11 +202,16 @@ def _silhouette_script():
     return script
 
 
-def _analyze_silhouettes(video):
+def _analyze_silhouettes(video, writer=None):
     tracker = ScriptedTracker(_silhouette_script())
     faces = HeadFaceDetector(tracker, face_sizes={CHILD: 34})
     return analyze_video(
-        video, tracker, faces, SizeAgeEstimator(60), AnalysisSettings(age_every=1)
+        video,
+        tracker,
+        faces,
+        SizeAgeEstimator(60),
+        AnalysisSettings(age_every=1),
+        mask_writer=writer,
     ).analysis
 
 
@@ -240,16 +246,30 @@ def _centre(frame, f):
     return frame[cy - 20 : cy + 20, cx - 12 : cx + 12]
 
 
-def test_render_silhouette_with_fallback_end_to_end(make_video, tmp_path):
+@pytest.mark.parametrize("storage", ["inline", "store"])
+def test_render_silhouette_with_fallback_end_to_end(make_video, tmp_path, storage):
     source = make_video(size="320x240")
-    analysis = _analyze_silhouettes(source)
-    # CLI-style persistence: JSON on disk, loaded back for render.
     path = tmp_path / "analysis.json"
+    observed_masks = SIL_FRAMES - len(GAP) - len(NO_MASK)
+    if storage == "store":
+        with MaskStoreWriter(tmp_path / "analysis.masks") as writer:
+            analysis = _analyze_silhouettes(source, writer)
+            analysis.mask_store = writer.close()
+        assert analysis.mask_count == 0 and analysis.mask_store["entries"] == observed_masks
+    else:
+        analysis = _analyze_silhouettes(source)
+        assert analysis.mask_count == observed_masks
+    # CLI-style persistence: JSON on disk, loaded back for render.
     path.write_text(json.dumps(analysis.to_dict()))
     loaded = Analysis.from_dict(json.loads(path.read_text()))
-    assert loaded.mask_count == analysis.mask_count > 0
     out = tmp_path / "out.mp4"
-    render_video(source, out, loaded, plan_render(loaded, DecisionPolicy()))
+    store = MaskStoreReader.for_analysis(loaded, tmp_path)
+    plan = plan_render(loaded, DecisionPolicy())
+    stats = render_video(source, out, loaded, plan, masks=store)
+    if store is not None:
+        assert plan.coverage_stats(store)["mask"] == observed_masks
+        store.close()
+    assert stats == {"mask": observed_masks, "box": 50 - observed_masks, "manual": 0}
     src, dst = dict(iter_frames(source)), dict(iter_frames(out))
 
     for f in (3, 30, 40):  # good silhouette frames

@@ -71,6 +71,8 @@ export interface AnalysisData {
   video: VideoInfo;
   settings: Record<string, unknown>;
   tracks: TrackData[];
+  /** Present when silhouettes are served by frame range from GET /masks. */
+  mask_store?: { format: "sfm1"; entries: number };
 }
 
 export type Override = "blur" | "keep";

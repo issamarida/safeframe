@@ -28,6 +28,7 @@ from typing import Any
 from safeframe.api.schemas import ACTIVE_STATES, JobOut, JobState, RenderRequest, VideoInfoOut
 from safeframe.pipeline.analyze import analyze_video
 from safeframe.pipeline.interfaces import AgeEstimator, Cancelled, FaceDetector, PersonTracker
+from safeframe.pipeline.maskstore import MaskStoreReader, MaskStoreWriter
 from safeframe.pipeline.policy import DecisionPolicy
 from safeframe.pipeline.render import plan_render, render_video
 from safeframe.pipeline.types import Analysis, Box, ManualRegion, VideoInfo
@@ -76,6 +77,11 @@ class Job:
     @property
     def analysis_path(self) -> Path:
         return self.dir / "analysis.json"
+
+    @property
+    def masks_path(self) -> Path:
+        """Silhouette store (derived personal data; same lifetime as the analysis)."""
+        return self.dir / "masks.sfm"
 
     @property
     def thumbs_dir(self) -> Path:
@@ -249,15 +255,20 @@ class JobManager:
                 job.progress = PREVIEW_SHARE + (1 - PREVIEW_SHARE) * fraction
                 job.touch()
 
-            result = analyze_video(
-                job.upload_path,
-                tracker,
-                faces,
-                ages,
-                progress=progress,
-                cancel=job.cancel,
-                info=job.video,
-            )
+            # The writer removes its partial file if analysis fails or is cancelled.
+            with MaskStoreWriter(job.masks_path) as writer:
+                result = analyze_video(
+                    job.upload_path,
+                    tracker,
+                    faces,
+                    ages,
+                    progress=progress,
+                    cancel=job.cancel,
+                    info=job.video,
+                    mask_writer=writer,
+                )
+                if writer.entries:
+                    result.analysis.mask_store = writer.close()
             job.analysis_path.write_text(json.dumps(result.analysis.to_dict()))
             job.thumbs_dir.mkdir(exist_ok=True)
             for track_id, jpeg in result.thumbnails.items():
@@ -274,6 +285,10 @@ class JobManager:
         except Exception as exc:
             log.exception("analysis failed for job %s", job.id)
             self._fail(job, f"Analysis failed: {exc}")
+
+    def open_masks(self, job: Job, analysis: Analysis) -> MaskStoreReader | None:
+        """Validated reader for the job's silhouette store, or None (boxes only)."""
+        return MaskStoreReader.for_analysis(analysis, job.dir)
 
     def load_analysis(self, job: Job) -> Analysis:
         if job.state not in (JobState.REVIEW, JobState.RENDERING, JobState.DONE):
@@ -316,14 +331,26 @@ class JobManager:
                 job.progress = fraction
                 job.touch()
 
-            stats = plan.coverage_stats()
+            store = self.open_masks(job, analysis)
+            try:
+                stats = render_video(
+                    job.upload_path,
+                    tmp,
+                    analysis,
+                    plan,
+                    progress=progress,
+                    cancel=job.cancel,
+                    masks=store,
+                )
+            finally:
+                if store is not None:
+                    store.close()
             log.info(
-                "job %s: rendering %d silhouette and %d box-fallback person-frames",
+                "job %s: rendered %d silhouette and %d box-fallback person-frames",
                 job.id,
                 stats["mask"],
                 stats["box"],
             )
-            render_video(job.upload_path, tmp, analysis, plan, progress=progress, cancel=job.cancel)
             tmp.replace(job.output_path)
             if not job.keep_upload:
                 self._delete_source_material(job)
@@ -340,6 +367,7 @@ class JobManager:
         """Remove everything that shows unblurred people."""
         job.upload_path.unlink(missing_ok=True)
         job.preview_path.unlink(missing_ok=True)
+        job.masks_path.unlink(missing_ok=True)
         shutil.rmtree(job.thumbs_dir, ignore_errors=True)
         job.upload_deleted = True
 

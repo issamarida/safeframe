@@ -237,13 +237,19 @@ class Analysis:
     video: VideoInfo
     tracks: list[Track]
     settings: dict
+    # Link to an on-disk mask store next to the analysis file (maskstore.py):
+    # {"format": "sfm1", "file": <basename>, "id": <hex>, "entries": n}.
+    mask_store: dict | None = None
 
     def to_dict(self) -> dict:
-        return {
+        data = {
             "video": self.video.to_dict(),
             "settings": self.settings,
             "tracks": [t.to_dict() for t in self.tracks],
         }
+        if self.mask_store is not None:
+            data["mask_store"] = self.mask_store
+        return data
 
     @classmethod
     def from_dict(cls, data: dict) -> Analysis:
@@ -255,6 +261,7 @@ class Analysis:
                 Track.from_dict(t, (video.width, video.height), budget) for t in data["tracks"]
             ],
             settings=data.get("settings", {}),
+            mask_store=data["mask_store"] if isinstance(data.get("mask_store"), dict) else None,
         )
 
     @property

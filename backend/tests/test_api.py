@@ -220,35 +220,77 @@ def test_restart_recovers_finished_jobs_and_drops_interrupted(settings, make_vid
         assert not interrupted.exists()
 
 
-def test_analysis_serves_validated_masks_gzipped(client, make_video, settings):
-    import json
+def test_masks_are_stored_on_disk_and_served_by_frame_range(
+    client, make_video, settings, monkeypatch
+):
+    from safeframe.pipeline import maskstore
 
     job = _wait(client, _upload(client, make_video(), keep=True)["id"], "review")
     jid = job["id"]
-    r = client.get(f"/api/jobs/{jid}/analysis")
-    body = r.json()
-    child = next(t for t in body["tracks"] if t["track_id"] == 1)
-    adult = next(t for t in body["tracks"] if t["track_id"] == 2)
-    frames = [row[0] for row in child["masks_v1"]]
+    job_dir = settings.jobs_dir / jid
+    assert (job_dir / "masks.sfm").is_file()
+    assert not list(job_dir.glob("*.partial"))
+
+    body = client.get(f"/api/jobs/{jid}/analysis").json()
+    assert body["mask_store"] == {"format": "sfm1", "entries": 45}  # file/id stay private
+    assert all("masks_v1" not in t for t in body["tracks"])
+
+    r = client.get(f"/api/jobs/{jid}/masks", params={"start": 0, "end": 50})
+    data = r.json()
+    assert data["end"] == 50 and set(data["tracks"]) == {"1"}  # adult is box-only
+    frames = [row[0] for row in data["tracks"]["1"]]
     assert frames == [f for f in range(50) if not 10 <= f < 15]
-    assert "masks_v1" not in adult  # box-only person
-    _frame, x, y, w, h, runs = child["masks_v1"][0]
+    _f, x, y, w, h, runs = data["tracks"]["1"][0]
     assert sum(runs) == w * h and x >= 0 and x + w <= 320 and y + h <= 240
 
-    # Large payloads are compressed when the client accepts it.
+    # Ranges are bounded; the client continues from the returned end.
+    monkeypatch.setattr(maskstore, "MAX_RANGE_FRAMES", 8)
+    data = client.get(f"/api/jobs/{jid}/masks", params={"start": 5, "end": 50}).json()
+    assert data["end"] == 13 and [row[0] for row in data["tracks"]["1"]] == [5, 6, 7, 8, 9]
+    assert client.get(f"/api/jobs/{jid}/masks", params={"start": 5, "end": 5}).status_code == 400
     headers = client.get(f"/api/jobs/{jid}/analysis", headers={"Accept-Encoding": "gzip"}).headers
-    assert headers.get("content-encoding") == "gzip"
-    # A tampered analysis on disk is validated, not trusted: bad rows are dropped.
-    path = settings.jobs_dir / jid / "analysis.json"
-    data = json.loads(path.read_text())
-    data["tracks"][0]["masks_v1"][0][5] = [1, 2, 3]
-    path.write_text(json.dumps(data))
-    child = next(
-        t for t in client.get(f"/api/jobs/{jid}/analysis").json()["tracks"] if t["track_id"] == 1
-    )
-    assert child["masks_v1"][0][0] == 1
+    assert headers.get("cache-control") == "no-store"
 
-    # Rendering the tampered analysis still protects frame 0 (box fallback).
-    r = client.post(f"/api/jobs/{jid}/render", json={})
-    assert r.status_code == 202
+    # A store that no longer matches the analysis is ignored: boxes only.
+    (job_dir / "masks.sfm").write_bytes(b"garbage")
+    assert "mask_store" not in client.get(f"/api/jobs/{jid}/analysis").json()
+    data = client.get(f"/api/jobs/{jid}/masks", params={"start": 0, "end": 50}).json()
+    assert data["tracks"] == {}
+    # ...and rendering still protects everyone with boxes.
+    assert client.post(f"/api/jobs/{jid}/render", json={}).status_code == 202
     _wait(client, jid, "done")
+
+
+def test_cancelled_analysis_leaves_no_partial_mask_store(settings, make_video):
+    import threading
+
+    gate = threading.Event()
+
+    def slow_components():
+        tracker, faces, ages = _components()
+        inner = tracker.update
+
+        def update(frame):
+            if tracker.frame == 5:
+                gate.wait(10)
+            return inner(frame)
+
+        tracker.update = update
+        return tracker, faces, ages
+
+    with TestClient(create_app(settings, components=slow_components)) as c:
+        job = _upload(c, make_video())
+        job_dir = settings.jobs_dir / job["id"]
+        deadline = time.time() + 30
+        while not (job_dir / "masks.sfm.partial").exists() and time.time() < deadline:
+            time.sleep(0.05)
+        assert (job_dir / "masks.sfm.partial").exists()
+        assert c.delete(f"/api/jobs/{job['id']}").status_code == 204
+        gate.set()
+        # The worker notices the cancel within a frame, discards the partial
+        # store, and the directory is removed (immediately or by the sweeper).
+        deadline = time.time() + 10
+        while job_dir.exists() and time.time() < deadline:
+            c.app.state.jobs.sweep()
+            time.sleep(0.1)
+        assert not job_dir.exists()

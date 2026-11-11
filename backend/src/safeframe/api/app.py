@@ -175,14 +175,41 @@ def build_router(settings: Settings) -> APIRouter:
         body = analysis.to_dict()
         for track in body["tracks"]:
             track.pop("samples", None)  # per-sample detail isn't needed by the UI
-        payload = json.dumps(body, separators=(",", ":")).encode()
-        headers = dict(NO_STORE)
-        if len(payload) > 8192 and "gzip" in request.headers.get("accept-encoding", ""):
-            # Silhouette run-lengths compress very well.
-            payload = gzip.compress(payload, compresslevel=5)
-            headers["Content-Encoding"] = "gzip"
-            headers["Vary"] = "Accept-Encoding"
-        return Response(payload, media_type="application/json", headers=headers)
+        # Tell the UI whether silhouettes can be fetched by frame range, and how
+        # many survived validation. File names and ids stay server-side.
+        body.pop("mask_store", None)
+        store = jobs.open_masks(job, analysis)
+        if store is not None:
+            with store:
+                if len(store):
+                    body["mask_store"] = {"format": "sfm1", "entries": len(store)}
+        return _json(request, body)
+
+    @router.get("/jobs/{job_id}/masks")
+    def get_masks(
+        request: Request,
+        start: int = Query(ge=0),
+        end: int = Query(gt=0),
+        job: Job = Depends(job_dep),
+        jobs: JobManager = Depends(manager),
+    ) -> Response:
+        """Validated silhouettes for frames ``[start, end)``, grouped by track.
+
+        The range is bounded; ``end`` in the response is the exclusive frame
+        actually covered, so clients continue from there.
+        """
+        if end <= start:
+            raise JobError("end must be greater than start")
+        analysis = jobs.load_analysis(job)
+        store = jobs.open_masks(job, analysis)
+        if store is None:
+            return _json(request, {"start": start, "end": end, "tracks": {}})
+        with store:
+            covered, rows = store.rows(start, end)
+        return _json(
+            request,
+            {"start": start, "end": covered, "tracks": {str(t): r for t, r in rows.items()}},
+        )
 
     @router.get("/jobs/{job_id}/preview")
     def get_preview(job: Job = Depends(job_dep)) -> FileResponse:
@@ -224,3 +251,15 @@ def _file(path: Path, media_type: str, missing: str, download: str | None = None
         headers=NO_STORE,
         content_disposition_type="attachment" if download else "inline",
     )
+
+
+def _json(request: Request, body: dict) -> Response:
+    """Compact JSON, gzip-compressed when large and the client accepts it."""
+    payload = json.dumps(body, separators=(",", ":")).encode()
+    headers = dict(NO_STORE)
+    if len(payload) > 8192 and "gzip" in request.headers.get("accept-encoding", ""):
+        # Silhouette run-lengths compress very well.
+        payload = gzip.compress(payload, compresslevel=5)
+        headers["Content-Encoding"] = "gzip"
+        headers["Vary"] = "Accept-Encoding"
+    return Response(payload, media_type="application/json", headers=headers)

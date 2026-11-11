@@ -268,6 +268,8 @@ export function regionsAtFrame(
   policy: Policy,
   overrides: Record<string, Override>,
   manual: ManualRegion[],
+  /** Silhouettes from the on-disk store (already validated), if any. */
+  maskAt?: (trackId: number, frame: number) => MaskRow | undefined,
 ): FrameRegion[] {
   const out: FrameRegion[] = [];
   for (const t of tracks) {
@@ -282,7 +284,11 @@ export function regionsAtFrame(
       status: classify(t, policy),
       trackId: t.track_id,
       interpolated: hit.interpolated,
-      ...(hit.mask && !hit.interpolated ? { mask: hit.mask } : {}),
+      ...(() => {
+        if (hit.interpolated) return {};
+        const mask = hit.mask ?? maskAt?.(t.track_id, frame);
+        return mask ? { mask } : {};
+      })(),
     });
   }
   for (const m of manual) {

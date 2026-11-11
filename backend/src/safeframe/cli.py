@@ -48,58 +48,91 @@ def _summarise(analysis, policy) -> None:
         )
 
 
-def _coverage(plan) -> None:
-    s = plan.coverage_stats()
+def _coverage(s: dict) -> None:
     print(
         f"protected person-frames: {s['mask']} by silhouette, {s['box']} by box fallback"
         + (f"; {s['manual']} manual region-frames" if s["manual"] else "")
     )
 
 
-def _analyze(path: Path, args):
+def masks_path_for(analysis_json: Path) -> Path:
+    """Sidecar mask store written next to an analysis JSON (``x.json`` -> ``x.masks``)."""
+    return analysis_json.with_suffix(".masks")
+
+
+def _analyze(path: Path, args, masks_path: Path):
     from safeframe.pipeline.analyze import analyze_video
     from safeframe.pipeline.factory import ModelBundle, ModelConfig
+    from safeframe.pipeline.maskstore import MaskStoreWriter
 
     bundle = ModelBundle(ModelConfig(yolo_weights=args.yolo, device=args.device))
-    return analyze_video(
-        path,
-        bundle.new_tracker(),
-        bundle.new_face_detector(),
-        bundle.age_estimator(),
-        progress=_bar("analysing"),
-    ).analysis
+    with MaskStoreWriter(masks_path) as writer:
+        analysis = analyze_video(
+            path,
+            bundle.new_tracker(),
+            bundle.new_face_detector(),
+            bundle.age_estimator(),
+            progress=_bar("analysing"),
+            mask_writer=writer,
+        ).analysis
+        if writer.entries:
+            analysis.mask_store = writer.close()
+    return analysis
+
+
+def _render(source: Path, output: Path, analysis, policy, base_dir: Path):
+    from safeframe.pipeline.maskstore import MaskStoreReader
+    from safeframe.pipeline.render import plan_render, render_video
+
+    plan = plan_render(analysis, policy)
+    store = MaskStoreReader.for_analysis(analysis, base_dir)
+    if analysis.mask_store is not None and store is None:
+        print(
+            f"warning: mask store {analysis.mask_store.get('file')!r} not found next to the "
+            "analysis; blurring whole boxes",
+            file=sys.stderr,
+        )
+    try:
+        stats = render_video(
+            source, output, analysis, plan, progress=_bar("rendering"), masks=store
+        )
+    finally:
+        if store is not None:
+            store.close()
+    return plan, stats
 
 
 def cmd_process(args) -> int:
-    from safeframe.pipeline.render import plan_render, render_video
+    import tempfile
 
-    analysis = _analyze(args.input, args)
     policy = _policy(args)
-    _summarise(analysis, policy)
-    plan = plan_render(analysis, policy)
-    render_video(args.input, args.output, analysis, plan, progress=_bar("rendering"))
+    with tempfile.TemporaryDirectory(prefix="safeframe-") as tmp:
+        analysis = _analyze(args.input, args, Path(tmp) / "analysis.masks")
+        _summarise(analysis, policy)
+        plan, stats = _render(args.input, args.output, analysis, policy, Path(tmp))
     print(f"wrote {args.output}  (blurred tracks: {plan.blurred_tracks or 'none'})")
-    _coverage(plan)
+    _coverage(stats)
     return 0
 
 
 def cmd_analyze(args) -> int:
-    analysis = _analyze(args.input, args)
+    masks = masks_path_for(args.output)
+    analysis = _analyze(args.input, args, masks)
     _summarise(analysis, _policy(args))
     args.output.write_text(json.dumps(analysis.to_dict()))
-    print(f"wrote {args.output}")
+    print(f"wrote {args.output}" + (f" and {masks}" if analysis.mask_store else ""))
     return 0
 
 
 def cmd_render(args) -> int:
-    from safeframe.pipeline.render import plan_render, render_video
     from safeframe.pipeline.types import Analysis
 
     analysis = Analysis.from_dict(json.loads(args.analysis.read_text()))
-    plan = plan_render(analysis, _policy(args))
-    render_video(args.input, args.output, analysis, plan, progress=_bar("rendering"))
+    _plan, stats = _render(
+        args.input, args.output, analysis, _policy(args), args.analysis.resolve().parent
+    )
     print(f"wrote {args.output}")
-    _coverage(plan)
+    _coverage(stats)
     return 0
 
 

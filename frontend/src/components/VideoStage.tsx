@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useRef, useState } from "react";
 import type { ManualRegion, Override, Rect, VideoInfo } from "../api/types";
+import type { MaskChunkCache } from "../review/masks";
 import {
   frameAtTime,
   normaliseRect,
@@ -31,6 +32,8 @@ interface Props {
   onDrawn: (rect: Rect) => void;
   onSelectTrack: (id: number | null) => void;
   videoRef: React.RefObject<HTMLVideoElement | null>;
+  /** Silhouettes loaded by frame range; absent for inline or box-only analyses. */
+  masks?: MaskChunkCache | null;
 }
 
 // Decoded silhouette rasters kept around for scrubbing back and forth.
@@ -102,7 +105,9 @@ export function VideoStage(props: Props) {
     ctx.clearRect(0, 0, canvas.width, canvas.height);
 
     const frame = frameRef.current;
-    const regions = regionsAtFrame(frame, p.tracks, p.policy, p.overrides, p.manual);
+    p.masks?.ensure(frame);
+    const maskAt = p.masks ? (t: number, f: number) => p.masks!.lookup(t, f) : undefined;
+    const regions = regionsAtFrame(frame, p.tracks, p.policy, p.overrides, p.manual, maskAt);
 
     // Pass 1: obscure. Each effect is drawn from the untouched video and only
     // ever adds coverage, so a kept region can never reveal blurred pixels.
@@ -192,6 +197,9 @@ export function VideoStage(props: Props) {
       ctx.setLineDash([]);
     }
   }, [filterSupported, maskCanvas, videoRef]);
+
+  // Redraw when silhouettes for nearby frames arrive.
+  useEffect(() => props.masks?.subscribe(draw), [draw, props.masks]);
 
   // Redraw whenever decisions change.
   useEffect(draw, [draw, props.policy, props.overrides, props.manual, props.mode, props.showBoxes,

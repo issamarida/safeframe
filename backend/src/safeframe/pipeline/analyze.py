@@ -26,6 +26,7 @@ from safeframe.pipeline.interfaces import (
     PersonTracker,
 )
 from safeframe.pipeline.masks import MAX_RUNS_TOTAL, WIRE_KEY, Budget, load_track_masks
+from safeframe.pipeline.maskstore import MaskStoreWriter
 from safeframe.pipeline.policy import aggregate
 from safeframe.pipeline.smoothing import smooth_track
 from safeframe.pipeline.types import AgeSample, Analysis, Track, VideoInfo
@@ -90,7 +91,15 @@ def analyze_video(
     progress: ProgressFn | None = None,
     cancel: CancelToken | None = None,
     info: VideoInfo | None = None,
+    mask_writer: MaskStoreWriter | None = None,
 ) -> AnalysisResult:
+    """Analyse ``path``.
+
+    With ``mask_writer`` silhouettes are streamed to that on-disk store (the
+    caller closes it and links it via ``Analysis.mask_store``); without one
+    they are kept inline on the tracks (``masks_v1``), within the inline
+    budgets.
+    """
     settings = settings or AnalysisSettings()
     info = info or probe(path)
     tracks: dict[int, Track] = {}
@@ -106,12 +115,16 @@ def analyze_video(
             raise Cancelled()
 
         people = tracker.update(frame)
+        if mask_writer is not None:
+            for person in sorted(people, key=lambda p: p.track_id):
+                if person.mask is not None:
+                    mask_writer.add(index, person.track_id, person.mask)
         for person in people:
             track = tracks.setdefault(person.track_id, Track(track_id=person.track_id))
             track.boxes[index] = person.box
             # Same zero-based decoded frame index as the box. Stop collecting
             # once the payload budget is clearly blown (the rest use boxes).
-            if person.mask is not None and mask_runs < MAX_RUNS_TOTAL:
+            if mask_writer is None and person.mask is not None and mask_runs < MAX_RUNS_TOTAL:
                 track.masks[index] = person.mask
                 mask_runs += person.mask.run_count
             track.peak_confidence = max(track.peak_confidence, person.confidence)
@@ -144,7 +157,9 @@ def analyze_video(
         progress(1.0)
     ordered = sorted(tracks.values(), key=lambda t: (t.first_frame, t.track_id))
     _apply_mask_budget(ordered, info)
-    masked = sum(len(t.masks) for t in ordered)
+    masked = sum(len(t.masks) for t in ordered) + (
+        mask_writer.entries if mask_writer is not None else 0
+    )
     observed = sum(len(t.boxes) - len(t.interpolated) for t in ordered)
     log.info(
         "analysed %d frames, %d tracks, silhouettes on %d of %d observed person-frames",

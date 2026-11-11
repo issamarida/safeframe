@@ -229,6 +229,10 @@ __marimo__/
 data/
 backend/data/
 *.job/
+# Silhouette mask stores (derived from footage: outlines of real people)
+*.masks
+*.sfm
+*.sfm.partial
 
 # Video / audio footage
 *.mp4

@@ -5,11 +5,12 @@ from __future__ import annotations
 import math
 from collections import defaultdict
 from collections.abc import Callable, Iterable, Mapping
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 
 from safeframe.pipeline.anonymize import DEFAULT_PADDING, ProtectedRegion, anonymize_frame
 from safeframe.pipeline.interfaces import Cancelled, CancelToken
+from safeframe.pipeline.maskstore import MaskStoreReader
 from safeframe.pipeline.policy import DecisionPolicy, Override
 from safeframe.pipeline.types import Analysis, Box, ManualRegion
 from safeframe.video.io import VideoWriter, iter_frames
@@ -33,8 +34,22 @@ class RenderPlan:
         """Fallback boxes of every planned region (the pre-silhouette view)."""
         return [r.box for r in self.regions.get(frame, [])]
 
-    def coverage_stats(self) -> dict[str, int]:
-        """Track-region frames protected by silhouette vs box fallback."""
+    def coverage_stats(self, store: MaskStoreReader | None = None) -> dict[str, int]:
+        """Track-region frames protected by silhouette vs box fallback.
+
+        With ``store``, a track frame counts as silhouette when the store has a
+        valid index entry for it (its payload is checked again at render time).
+        """
+        if store is not None and len(store):
+            pairs = [
+                (f, r.track_id)
+                for f, regions in self.regions.items()
+                for r in regions
+                if r.kind == "track" and r.mask is None
+            ]
+            from_store = store.count_for(pairs)
+            stats = self.coverage_stats()
+            return {**stats, "mask": stats["mask"] + from_store, "box": stats["box"] - from_store}
         stats = {"mask": 0, "box": 0, "manual": 0}
         for regions in self.regions.values():
             for r in regions:
@@ -82,6 +97,22 @@ def plan_render(
     return plan
 
 
+def _with_store_masks(
+    regions: list[ProtectedRegion], frame: int, store: MaskStoreReader | None
+) -> list[ProtectedRegion]:
+    if store is None or not len(store):
+        return regions
+    masks = store.masks_for_frame(frame)
+    if not masks:
+        return regions
+    return [
+        replace(r, mask=masks[r.track_id])
+        if r.kind == "track" and r.mask is None and r.track_id in masks
+        else r
+        for r in regions
+    ]
+
+
 def _check_protectable(frame: int, regions: list[ProtectedRegion], w: int, h: int) -> None:
     for r in regions:
         if r.mask is not None:
@@ -102,26 +133,36 @@ def render_video(
     progress: Callable[[float], None] | None = None,
     cancel: CancelToken | None = None,
     padding: float = DEFAULT_PADDING,
-) -> None:
+    masks: MaskStoreReader | None = None,
+) -> dict[str, int]:
     """Write ``output`` with every planned region blurred and greyscaled.
 
+    Track regions without an inline mask take their silhouette from ``masks``
+    (the analysis' on-disk store) when it has a valid one for that frame.
     Resolution, exact frame rate and audio are preserved; untouched pixels are
     only re-encoded (visually lossless CRF 18). Raises :class:`RenderError`
     before writing a frame whose planned region has neither a valid mask nor a
-    valid fallback box; callers must discard the partial output.
+    valid fallback box; the writer then deletes the partial output.
+
+    Returns the person-frames actually protected by silhouette and by box.
     """
     info = analysis.video
     total = max(info.frame_count, 1)
+    stats = {"mask": 0, "box": 0, "manual": 0}
     with VideoWriter(output, info, audio_source=source) as writer:
         for index, frame in iter_frames(source):
             if cancel is not None and cancel.is_set():
                 raise Cancelled()
-            regions = plan.regions_for(index)
+            regions = _with_store_masks(plan.regions_for(index), index, masks)
             if regions:
                 _check_protectable(index, regions, frame.shape[1], frame.shape[0])
                 anonymize_frame(frame, regions, padding)
+                for r in regions:
+                    kind = "manual" if r.kind == "manual" else "mask" if r.mask else "box"
+                    stats[kind] += 1
             writer.write(frame)
             if progress is not None and index % 10 == 0:
                 progress(min(0.999, (index + 1) / total))
     if progress is not None:
         progress(1.0)
+    return stats
