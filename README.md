@@ -110,6 +110,7 @@ principles behind every design decision:
 | **A human always decides** | The software only makes suggestions. Nothing is exported until a person has reviewed it. |
 | **Lean towards protection** | The tool deliberately blurs borderline teenagers rather than risk exposing them. |
 | **No blinking** | The blur stays in place for the whole time a person is on screen, so there is no single frame where a face slips through. |
+| **Hide the child, keep the moment** | The blur follows the outline of each child's body, so the stage, the room and the people around them stay visible. On any frame where the outline isn't reliable, SafeFrame blurs the whole rectangle around the child instead. |
 | **Nothing is kept** | Uploaded videos are deleted as soon as the safe copy is ready, and anything left over is wiped automatically after 24 hours. |
 | **Location stays private** | Hidden data such as the GPS location where the video was filmed is removed. |
 | **Not a surveillance tool** | SafeFrame does not identify who anyone is, store faces or build profiles. Its only purpose is to *hide* people. |
@@ -121,6 +122,10 @@ principles behind every design decision:
   human review step exists.
 - **Faces that can't be seen can't be judged.** People filmed only from behind
   or far away are blurred to be safe, so some adults will be blurred too.
+- **Outlines can be imperfect.** The body outline comes from an AI model and
+  can occasionally miss part of a person, such as a raised hand. Always watch
+  the preview before sharing, and draw a rectangular blur by hand anywhere
+  the outline looks too tight.
 - **Busy crowds are hard.** In very crowded scenes the tool can occasionally
   mix people up. The review screen lets you fix this.
 - **It only works on videos you run through it.** It can't protect a child in

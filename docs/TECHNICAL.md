@@ -32,19 +32,20 @@ of anyone's age.
 
 ```mermaid
 flowchart LR
-    A[Video] --> B[YOLO person detection]
+    A[Video] --> B[YOLO person detection<br/>+ instance segmentation]
     B --> C[BoT-SORT tracking + ReID<br/>one ID per person]
     C --> D[YuNet face detection<br/>matched to tracks]
     D --> E[ViT apparent-age model<br/>P&#40;under 18&#41; per face]
     E --> F[Evidence aggregated<br/>per track]
     F --> G{Decision policy}
-    G -->|minor / uncertain| H[Gaussian blur → greyscale]
+    G -->|minor / uncertain| H[Gaussian blur → greyscale<br/>inside the silhouette, or the box]
     G -->|adult| I[Unchanged]
     H --> J[FFmpeg: H.264 MP4<br/>original resolution, fps, audio]
     I --> J
 ```
 
-1. **Detect and track people.** Ultralytics YOLO finds people in each frame;
+1. **Detect, segment and track people.** Ultralytics YOLO (`yolo11n-seg.pt`)
+   finds people in each frame and outlines each one (an instance mask);
    BoT-SORT with appearance re-identification links them into tracks. Identity
    comes from the *body*, not the face, so a person keeps the same ID while they
    turn their head away or are briefly occluded.
@@ -61,8 +62,12 @@ flowchart LR
 5. **Smooth over gaps.** Short gaps inside a track are interpolated and each
    track is padded by 0.25 s at both ends, so blur never flickers off during a
    missed detection.
-6. **Anonymise and encode.** Each flagged box (+8 % padding) gets a strong
-   Gaussian blur scaled to its size, then is converted to greyscale. Frames are
+6. **Anonymise and encode.** Each flagged person gets a strong Gaussian blur
+   scaled to their size, then greyscale, applied **inside their silhouette**
+   (the model's mask grown by a small safety margin), so the background inside
+   their box stays visible. On frames without a usable silhouette (interpolated
+   gaps, padded ends, rejected or missing masks, box-only models) the whole box
+   (+8 % padding) is blurred instead, as before. Manual regions are rectangles. Frames are
    piped to FFmpeg, which writes H.264 at the source's exact resolution and
    rational frame rate and muxes the original audio back in (stream-copied when
    MP4-compatible). Container metadata such as GPS location is dropped.
@@ -98,7 +103,11 @@ make serve     # builds the UI and serves it from FastAPI on http://127.0.0.1:80
 3. **Review.** Play the video with the blur previewed live in the browser, or
    switch to the original with colour-coded boxes. Step through flagged
    segments, adjust the sensitivity slider, set any person to Blur or Keep,
-   and draw extra regions over anyone who was missed.
+   and draw extra regions over anyone who was missed. The preview is drawn
+   over the original video in your browser (same silhouette-or-box choice per
+   frame as the export, though browser blur strength differs slightly); only
+   the exported file has the blur baked in. "Original + boxes" labels each
+   blurred person `silhouette` or `box` for the current frame.
 4. **Export** and download the MP4. The original, preview and thumbnails are
    then deleted from the server unless you chose to keep them.
 
@@ -118,6 +127,7 @@ analysing  [##############################] 100.0%
   track    5  frames    120-160    P(<18)=  n/a  face samples=  0  -> uncertain
 rendering  [##############################] 100.0%
 wrote holiday-safe.mp4  (blurred tracks: [1, 5])
+protected person-frames: 401 by silhouette, 52 by box fallback
 ```
 
 Analysis and rendering can also run separately, so an analysis can be reviewed
@@ -143,7 +153,7 @@ verified against a pinned SHA-256.
 | `POST /api/jobs?filename=…&keep_upload=false` | Upload a video as the raw request body; starts analysis |
 | `GET /api/jobs/{id}` | Job state, stage and progress |
 | `GET /api/jobs/{id}/events` | Server-sent events stream of job progress |
-| `GET /api/jobs/{id}/analysis` | Tracks with per-frame boxes, P(under 18), face-evidence counts |
+| `GET /api/jobs/{id}/analysis` | Tracks with per-frame boxes, optional `masks_v1` silhouettes, P(under 18), face-evidence counts (gzip when accepted) |
 | `GET /api/jobs/{id}/preview` | Browser-playable preview (supports range requests) |
 | `GET /api/jobs/{id}/tracks/{track}/thumbnail` | Review thumbnail for one person |
 | `POST /api/jobs/{id}/render` | `{threshold, min_face_samples, overrides, manual_regions}`; starts export |
@@ -168,6 +178,17 @@ self-hosted machine; put authentication in front of it before exposing it.
   be blurred too.
 - **Missed detections.** Very small, heavily occluded or unusually posed people
   may not be detected at all. The review screen lets you add manual regions.
+- **Incomplete silhouettes.** A mask can miss part of a person (a raised hand,
+  hair, a partly occluded limb) even when it passes the geometry checks. The
+  safety margin and the box fallback reduce but do not remove this risk;
+  review the preview, and use a manual region where coverage looks thin. Pass
+  `--yolo yolo11n.pt` (or `SAFEFRAME_YOLO_WEIGHTS=yolo11n.pt`) for the old
+  rectangle-only behaviour.
+- **Silhouettes on long videos.** Masks are stored inline in the analysis
+  JSON with fixed budgets (about 1 minute of one person per track and about
+  4 000 person-frames per video at typical sizes). Beyond that, frames use the
+  padded rectangle. This is safe but means long or crowded videos get fewer
+  silhouettes; a frame-addressable mask store would lift the limit.
 - **Identity switches.** In dense crowds, trackers can swap IDs when people
   cross. Interpolation and padding reduce, but do not eliminate, the effect.
 - **Variable frame rate** input is rendered at its average frame rate.
@@ -175,7 +196,8 @@ self-hosted machine; put authentication in front of it before exposing it.
 ## Model licences
 
 SafeFrame's code is MIT licensed. The models it downloads have their own terms:
-Ultralytics YOLO (AGPL-3.0 or Ultralytics Enterprise licence), OpenCV YuNet
+Ultralytics YOLO, including the default `yolo11n-seg.pt` segmentation weights
+(AGPL-3.0 or Ultralytics Enterprise licence, same as the detection weights), OpenCV YuNet
 (MIT), and `nateraw/vit-age-classifier` (see its model card; trained on FairFace,
 CC BY 4.0). Review these before any commercial deployment.
 

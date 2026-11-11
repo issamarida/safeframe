@@ -11,13 +11,14 @@ backend/                     uv project (Python 3.13), package `safeframe`
   src/safeframe/
     pipeline/
       types.py               Box, Track, AgeSample, VideoInfo, Analysis (+ JSON)
-      detection.py           YOLO + BoT-SORT person tracker
+      detection.py           YOLO-seg + BoT-SORT person tracker, mask extraction
+      masks.py               silhouette coverage, masks_v1 format, validation, budgets
       botsort_safeframe.yaml tuned tracker config (3 s buffer, ReID)
       faces.py               YuNet face detector, face → person assignment
       age.py                 ViT apparent-age estimator → P(under 18)
       policy.py              decision policy (keep in sync with frontend model.ts)
       smoothing.py           gap interpolation and end padding
-      anonymize.py           Gaussian blur + greyscale
+      anonymize.py           Gaussian blur + greyscale inside silhouette or box
       analyze.py / render.py the two pipeline phases
       factory.py             builds real model components
     video/io.py              ffprobe, OpenCV decode, FFmpeg encode, preview proxy
@@ -57,7 +58,10 @@ Model weights are cached outside the repository: `~/.cache/safeframe/models`
 | Age sampling | every 3 frames, ≤ 40 samples per person | `AnalysisSettings` |
 | Minimum usable face | 32 px | `AnalysisSettings.min_face_px` |
 | Gap interpolation / end padding | 1.5 s / 0.25 s | `AnalysisSettings` |
-| Region padding | 8 % per side | `anonymize.DEFAULT_PADDING` |
+| Region padding (box fallback, manual) | 8 % per side | `anonymize.DEFAULT_PADDING` |
+| Person model | `yolo11n-seg.pt` | `models.DEFAULT_YOLO_WEIGHTS` |
+| Silhouette margin | 3 % of longer box side, 3–24 px | `masks.margin_px` |
+| Mask budgets | 8 192 runs/mask, 1.5 M/track, 4 M/analysis | `masks.MAX_RUNS_*` |
 | Job expiry | 24 h idle | `SAFEFRAME_JOB_TTL_HOURS` |
 
 ## Keeping the preview honest
@@ -66,7 +70,10 @@ The review screen's blur preview must match the exported file. When you
 change decision logic in `backend/src/safeframe/pipeline/policy.py`, make the
 same change in `frontend/src/review/model.ts` and update both test files
 (`tests/test_policy.py`, `src/review/model.test.ts`). The same applies to
-region padding (`anonymize.DEFAULT_PADDING` ↔ `PADDING` in `VideoStage.tsx`).
+region padding (`anonymize.DEFAULT_PADDING` ↔ `PADDING` in `model.ts`) and to
+mask validation and budgets (`pipeline/masks.py` ↔ `parseMaskRow`,
+`indexTracks` and `MAX_RUNS_*` in `model.ts`), so the preview and the export
+choose the same silhouette or box on every frame.
 
 ## Testing notes
 
