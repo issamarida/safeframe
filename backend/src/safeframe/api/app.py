@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import gzip
 import json
 import logging
 import threading
@@ -165,14 +166,23 @@ def build_router(settings: Settings) -> APIRouter:
         )
 
     @router.get("/jobs/{job_id}/analysis")
-    def get_analysis(job: Job = Depends(job_dep), jobs: JobManager = Depends(manager)) -> Response:
+    def get_analysis(
+        request: Request, job: Job = Depends(job_dep), jobs: JobManager = Depends(manager)
+    ) -> Response:
+        # Re-serialised from the validated model, so the UI only ever receives
+        # masks the renderer would also accept (same frames, same budgets).
         analysis = jobs.load_analysis(job)
         body = analysis.to_dict()
         for track in body["tracks"]:
             track.pop("samples", None)  # per-sample detail isn't needed by the UI
-        return Response(
-            json.dumps(body, separators=(",", ":")), media_type="application/json", headers=NO_STORE
-        )
+        payload = json.dumps(body, separators=(",", ":")).encode()
+        headers = dict(NO_STORE)
+        if len(payload) > 8192 and "gzip" in request.headers.get("accept-encoding", ""):
+            # Silhouette run-lengths compress very well.
+            payload = gzip.compress(payload, compresslevel=5)
+            headers["Content-Encoding"] = "gzip"
+            headers["Vary"] = "Accept-Encoding"
+        return Response(payload, media_type="application/json", headers=headers)
 
     @router.get("/jobs/{job_id}/preview")
     def get_preview(job: Job = Depends(job_dep)) -> FileResponse:

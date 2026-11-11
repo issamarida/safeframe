@@ -1,10 +1,19 @@
 import numpy as np
 
-from safeframe.pipeline.anonymize import anonymize_regions, gaussian_blur_strong, pixel_rect
+from safeframe.pipeline.anonymize import (
+    DEFAULT_PADDING,
+    ProtectedRegion,
+    anonymize_frame,
+    anonymize_regions,
+    gaussian_blur_strong,
+    pixel_rect,
+    to_greyscale,
+)
 from safeframe.pipeline.faces import assign_faces, crop_face
+from safeframe.pipeline.masks import Mask, encode
 from safeframe.pipeline.types import Box, FaceDetection
 
-from .conftest import person
+from .conftest import ellipse_mask, person
 
 
 def _noise(h=200, w=300, seed=0):
@@ -81,3 +90,108 @@ def test_best_face_per_person():
 def test_crop_face_is_square_with_margin():
     crop = crop_face(_noise(), Box(100, 50, 140, 90), margin=0.25)
     assert crop is not None and crop.shape[:2] == (60, 60)
+
+
+# --- silhouette compositing ----------------------------------------------------
+
+
+def _coverage(mask: Mask, h: int, w: int) -> np.ndarray:
+    cov = np.zeros((h, w), bool)
+    cov[mask.y : mask.y + mask.height, mask.x : mask.x + mask.width] = mask.decode()
+    return cov
+
+
+def _l_shape_mask(box: Box) -> Mask:
+    """A non-rectangular, non-convex 'person': an L that leaves the box's
+    top-right and bottom-right areas empty."""
+    x1, y1, x2, y2 = (int(v) for v in (box.x1, box.y1, box.x2, box.y2))
+    crop = np.zeros((y2 - y1, x2 - x1), bool)
+    crop[:, : (x2 - x1) // 3] = True  # vertical bar
+    crop[-(y2 - y1) // 4 :, :] = True  # foot
+    crop[-(y2 - y1) // 4 :, -4:] = False
+    mask = encode(crop, x1, y1)
+    assert mask is not None
+    return mask
+
+
+def test_silhouette_changes_inside_and_leaves_box_corners_untouched():
+    frame = _noise()
+    original = frame.copy()
+    box = Box(80, 30, 200, 180)
+    mask = _l_shape_mask(box)
+    anonymize_frame(frame, [ProtectedRegion(box, mask)])
+    cov = _coverage(mask, *frame.shape[:2])
+
+    changed = np.any(frame != original, axis=2)
+    assert changed[cov].mean() > 0.95  # protected interior changed
+    assert not changed[~cov].any()  # nothing outside coverage changed (pre-encoding)
+    # The box's top-right corner is background and must stay exactly as it was.
+    assert np.array_equal(frame[31, 198], original[31, 198])
+    inside = frame[cov].astype(int)
+    assert np.array_equal(inside[:, 0], inside[:, 1])  # greyscale
+
+
+def test_ellipse_mask_at_image_edge():
+    frame = _noise()
+    original = frame.copy()
+    box = Box(-40, 120, 60, 200)
+    mask = ellipse_mask(Box(-40, 120, 60, 260), 300, 200)
+    anonymize_frame(frame, [ProtectedRegion(box, mask)])
+    cov = _coverage(mask, 200, 300)
+    changed = np.any(frame != original, axis=2)
+    assert changed[cov].mean() > 0.95 and not changed[~cov].any()
+    assert cov[199].any() and cov[:, 0].any()  # really touches both edges
+
+
+def test_overlapping_regions_never_restore_or_double_blur():
+    frame = _noise()
+    source = frame.copy()
+    a = ProtectedRegion(Box(40, 20, 160, 190), ellipse_mask(Box(40, 20, 160, 190), 300, 200))
+    b = ProtectedRegion(Box(100, 30, 220, 190), ellipse_mask(Box(100, 30, 220, 190), 300, 200))
+    anonymize_frame(frame, [a, b])
+    cov_a = _coverage(a.mask, 200, 300)
+    cov_b = _coverage(b.mask, 200, 300)
+    both = cov_a & cov_b
+    assert both.any()
+    changed = np.any(frame != source, axis=2)
+    assert changed[cov_a | cov_b].mean() > 0.95
+    # In the overlap the later region's effect, computed from the untouched
+    # source, is what remains: not a blur of an already blurred image.
+    x1, y1, x2, y2 = pixel_rect(b.box, 300, 200, DEFAULT_PADDING)
+    roi = source[y1:y2, x1:x2]
+    effect = to_greyscale(gaussian_blur_strong(roi))
+    full = np.zeros_like(frame)
+    full[y1:y2, x1:x2] = effect
+    assert np.array_equal(frame[both], full[both])
+
+
+def test_kept_region_overlap_cannot_unblur_and_manual_rect_is_rectangular():
+    frame = _noise()
+    original = frame.copy()
+    person_box = Box(40, 20, 160, 190)
+    blur = ProtectedRegion(person_box, ellipse_mask(person_box, 300, 200))
+    manual = ProtectedRegion(Box(200, 20, 260, 80), kind="manual")
+    # Kept tracks are simply absent from the plan; manual regions are rectangles.
+    anonymize_frame(frame, [blur, manual])
+    x1, y1, x2, y2 = pixel_rect(manual.box, 300, 200)
+    changed = np.any(frame != original, axis=2)
+    assert changed[y1:y2, x1:x2].mean() > 0.95
+    cov = _coverage(blur.mask, 200, 300)
+    assert changed[cov].mean() > 0.95
+
+
+def test_box_fallback_matches_old_rectangular_behaviour():
+    a, b = _noise(), _noise()
+    anonymize_regions(a, [Box(50, 40, 150, 160)])
+    anonymize_frame(b, [ProtectedRegion(Box(50, 40, 150, 160), None)])
+    assert np.array_equal(a, b)
+
+
+def test_mask_outside_frame_falls_back_to_box():
+    frame = _noise()
+    original = frame.copy()
+    bad = Mask(290, 190, 20, 20, (0, 400))  # extends past a 300x200 frame
+    anonymize_frame(frame, [ProtectedRegion(Box(250, 150, 290, 190), bad)])
+    x1, y1, x2, y2 = pixel_rect(Box(250, 150, 290, 190), 300, 200)
+    changed = np.any(frame != original, axis=2)
+    assert changed[y1:y2, x1:x2].mean() > 0.95

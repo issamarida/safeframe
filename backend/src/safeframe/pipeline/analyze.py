@@ -25,6 +25,7 @@ from safeframe.pipeline.interfaces import (
     FaceDetector,
     PersonTracker,
 )
+from safeframe.pipeline.masks import MAX_RUNS_TOTAL, WIRE_KEY, Budget, load_track_masks
 from safeframe.pipeline.policy import aggregate
 from safeframe.pipeline.smoothing import smooth_track
 from safeframe.pipeline.types import AgeSample, Analysis, Track, VideoInfo
@@ -97,6 +98,7 @@ def analyze_video(
     thumb_conf: dict[int, float] = {}
     total = max(info.frame_count, 1)
     last_index = -1
+    mask_runs = 0
 
     for index, frame in iter_frames(path):
         last_index = index
@@ -107,6 +109,11 @@ def analyze_video(
         for person in people:
             track = tracks.setdefault(person.track_id, Track(track_id=person.track_id))
             track.boxes[index] = person.box
+            # Same zero-based decoded frame index as the box. Stop collecting
+            # once the payload budget is clearly blown (the rest use boxes).
+            if person.mask is not None and mask_runs < MAX_RUNS_TOTAL:
+                track.masks[index] = person.mask
+                mask_runs += person.mask.run_count
             track.peak_confidence = max(track.peak_confidence, person.confidence)
             if person.confidence > thumb_conf.get(person.track_id, -1.0):
                 thumb = _thumbnail(frame, person.box, settings.thumbnail_px)
@@ -136,11 +143,36 @@ def analyze_video(
     if progress is not None:
         progress(1.0)
     ordered = sorted(tracks.values(), key=lambda t: (t.first_frame, t.track_id))
-    log.info("analysed %d frames, %d tracks", frame_count, len(ordered))
+    _apply_mask_budget(ordered, info)
+    masked = sum(len(t.masks) for t in ordered)
+    observed = sum(len(t.boxes) - len(t.interpolated) for t in ordered)
+    log.info(
+        "analysed %d frames, %d tracks, silhouettes on %d of %d observed person-frames",
+        frame_count,
+        len(ordered),
+        masked,
+        observed,
+    )
     return AnalysisResult(
-        analysis=Analysis(video=info, tracks=ordered, settings=settings.to_dict()),
+        analysis=Analysis(
+            video=info,
+            tracks=ordered,
+            settings={**settings.to_dict(), "mask_format": WIRE_KEY},
+        ),
         thumbnails=thumbs,
     )
+
+
+def _apply_mask_budget(tracks: list[Track], info: VideoInfo) -> None:
+    """Keep exactly the masks the loaders will accept, in the order they read them,
+    so analysis, saved JSON, export and review all agree on mask vs box frames."""
+    budget = Budget()
+    for track in tracks:
+        if not track.masks:
+            continue
+        observed = set(track.boxes) - track.interpolated
+        rows = [track.masks[f].to_row(f) for f in sorted(track.masks)]
+        track.masks = load_track_masks(rows, observed, info.width, info.height, budget)
 
 
 def _sample_ages(frame, index, people, tracks, face_detector, age_estimator, settings) -> None:
