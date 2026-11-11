@@ -1,194 +1,259 @@
-# SafeFrame
+<div align="center">
 
-**Blur children in a video before you share it.**
+# 🛡️ SafeFrame
 
-SafeFrame takes a video, finds every person in it, estimates who is likely to be
-under 18, and returns a copy in which those people are blurred in every frame
-they appear. Adults and the background are left unchanged. Anyone SafeFrame is
-unsure about is blurred by default, and a human reviews every decision before
-anything is exported.
+### Share your memories — not other people's children.
 
-[![CI](https://github.com/issamarida/meta-support/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/issamarida/meta-support/actions/workflows/ci.yml)
+*An IE Challenge project by the SafeFrame Crew*
 
-## Intended use
+</div>
 
-SafeFrame is intended for **protecting children's privacy in video that is
-going to be shared** — a parent posting a school concert, a creator filming in
-a public park, a club publishing match footage, a wearable-camera clip that
-caught kids in the background.
+<!--
+  BEFORE / AFTER GIF GOES HERE.
+  Save the file as docs/media/before-after.gif and replace this comment with:
+  <p align="center"><img src="docs/media/before-after.gif" alt="The same video before and after SafeFrame: children are blurred, adults stay visible" width="720"></p>
+  Use stock or consented footage only, never real children without permission.
+-->
 
-It is **not** an age-verification system. It must not be used to identify,
-profile, track or make decisions about people, and its output is not evidence
-of anyone's age.
+---
 
-> **Age estimation is probabilistic.** SafeFrame estimates *apparent* age from
-> visible faces. It can be wrong — especially for teenagers close to 18, for
-> faces that are small, turned away or partly hidden, and with uneven accuracy
-> across demographic groups. That is why uncertain people are blurred by default
-> and why the review step exists. Always watch the result before sharing it.
+## In one sentence
 
-## How it works
+**SafeFrame is a tool that automatically blurs children in a video before it is
+posted online, while a person always has the final say on what gets shared.**
+
+---
+
+## 📉 The problem
+
+Every day, millions of videos are filmed at school plays, birthday parties,
+football matches, parks and holidays, and then posted online. Most of them
+include children. Some of those children belong to the person filming. Many do
+not.
+
+Once a child's face is online, it is very hard to take it back. A clip can be
+copied, re-shared, searched and stored for years. The child had no say in it and
+may only find out much later.
+
+### The numbers
+
+| | |
+|---|---|
+| **~1,500** | photos the average UK parent has posted of their child by the child's **fifth birthday**. Only **16 %** of parents always ask permission before posting a photo of someone else.<sup>[1]</sup> |
+| **81 %** | of children across ten countries (including the UK, France, Spain and the US) already had a digital footprint **before age two**. In the US the figure was **92 %**.<sup>[2]</sup> |
+| **74 %** | of parents of young children know another parent who has **shared too much** about a child online. **51 %** had seen posts revealing where a child could be found, and 27 % had seen inappropriate photos.<sup>[3]</sup> |
+| **2×** | Children were **twice as likely as their parents** to worry about family members posting about them without permission. Asking permission first was the most common rule they wanted.<sup>[4]</sup> |
+| **⅔** | of identity fraud facing young people could stem from "sharenting" by 2030, costing an estimated **£670 million a year**, according to a forecast by Barclays.<sup>[5]</sup> |
+
+### Why this is getting harder, not easier
+
+- **Everyone films everything.** Phones, action cameras and smart glasses mean a
+  child can appear in dozens of strangers' videos in a single afternoon.
+- **The person filming is rarely the parent.** Parents told us their biggest
+  frustration is *other people's* recordings, from relatives, other parents,
+  clubs and schools. They have little control over those.
+- **Asking doesn't scale.** "Please don't post my child" is easy to forget,
+  awkward to repeat, and impossible to enforce.
+- **Blurring by hand is slow.** Hiding one child in a two-minute video means
+  editing thousands of individual frames. Almost nobody does it.
+- **The law is moving.** Europe's data-protection rules (GDPR) state that
+  children *"merit specific protection"* with regard to their personal data.<sup>[6]</sup>
+  In 2024 France passed a law making parents jointly responsible for protecting
+  their children's image rights.<sup>[7]</sup> Schools, clubs and creators are
+  increasingly expected to get this right.
+
+---
+
+## 🎯 Who we are helping
+
+| Who | Their situation | What they need |
+|---|---|---|
+| **Parents and guardians** | Want to share family moments without exposing their own or other children | A quick, reliable way to post responsibly |
+| **Schools, sports clubs and event organisers** | Publish photos and videos of events and are responsible for the children in them | Protection at scale, without spending hours editing or chasing consent forms |
+| **Content creators** | Film in public places where children wander into the shot | A safety net before they hit "publish" |
+| **Children** *(the real beneficiaries)* | Have no say over the footage of them that exists online | Their privacy respected by default |
+
+---
+
+## 💡 Our solution
+
+SafeFrame turns hours of manual editing into a few clicks.
 
 ```mermaid
 flowchart LR
-    A[Video] --> B[YOLO person detection]
-    B --> C[BoT-SORT tracking + ReID<br/>one ID per person]
-    C --> D[YuNet face detection<br/>matched to tracks]
-    D --> E[ViT apparent-age model<br/>P&#40;under 18&#41; per face]
-    E --> F[Evidence aggregated<br/>per track]
-    F --> G{Decision policy}
-    G -->|minor / uncertain| H[Gaussian blur → greyscale]
-    G -->|adult| I[Unchanged]
-    H --> J[FFmpeg: H.264 MP4<br/>original resolution, fps, audio]
-    I --> J
+    A["📤 <b>1. Upload</b><br/>Add your video"] --> B["🔍 <b>2. Analyse</b><br/>SafeFrame spots everyone<br/>and estimates who may<br/>be under 18"]
+    B --> C["👀 <b>3. Review</b><br/>You check every decision<br/>and blur or un-blur<br/>anyone you like"]
+    C --> D["✅ <b>4. Share</b><br/>Download a safe copy,<br/>ready to post"]
 ```
 
-1. **Detect and track people.** Ultralytics YOLO finds people in each frame;
-   BoT-SORT with appearance re-identification links them into tracks. Identity
-   comes from the *body*, not the face, so a person keeps the same ID while they
-   turn their head away or are briefly occluded.
-2. **Estimate age from visible faces.** Every few frames, faces are detected
-   (OpenCV YuNet) and assigned to the track whose head region contains them. A
-   ViT classifier fine-tuned on FairFace predicts a distribution over age ranges,
-   converted to P(under 18) — the `10-19` bucket contributes 8/10 of its mass.
-3. **Aggregate evidence per person.** Samples are averaged, weighted by face
-   size and detector confidence. The resulting decision applies to *every*
-   frame of that track, including frames where the face is hidden.
-4. **Decide, failing closed.** A track is *likely minor* if P(under 18) ≥ the
-   threshold (default 0.35), *likely adult* below it, and *uncertain* if it has
-   fewer than 3 usable face observations. Minors **and** uncertain tracks are blurred.
-5. **Smooth over gaps.** Short gaps inside a track are interpolated and each
-   track is padded by 0.25 s at both ends, so blur never flickers off during a
-   missed detection.
-6. **Anonymise and encode.** Each flagged box (+8 % padding) gets a strong
-   Gaussian blur scaled to its size, then is converted to greyscale. Frames are
-   piped to FFmpeg, which writes H.264 at the source's exact resolution and
-   rational frame rate and muxes the original audio back in (stream-copied when
-   MP4-compatible). Container metadata such as GPS location is dropped.
+1. **Upload** a video, for example from a school concert.
+2. **SafeFrame analyses it.** It finds every person in the video and follows
+   them from start to finish, even when they turn around or walk behind
+   someone. For each person it estimates whether they are likely to be a child.
+3. **You review the result.** Children and anyone the tool is unsure about are
+   blurred. You can watch the preview, change any decision, and add a blur to
+   anyone who was missed.
+4. **Download and share.** The final video looks exactly like the original
+   (same quality, same sound) except that the children are no longer
+   recognisable. Hidden location data stored inside the file is removed too.
 
-## Safety design
+---
 
-| Decision | Why |
-| --- | --- |
-| Uncertain ⇒ blurred | A missed child is a privacy failure; an extra blur is a usability cost the reviewer can undo. |
-| Threshold defaults to 0.35, not 0.5 | Errs further toward blurring borderline teenagers. |
-| Minimum face evidence before "adult" | One good-looking frame is not enough to un-blur someone. |
-| Body-based tracking | Decisions survive head turns, back-of-head shots and occlusion. |
-| Interpolation + end padding | No single-frame leaks when the detector blinks. |
-| Blur strength scales with box size | A 900 px face is as unrecognisable as a 90 px one. |
-| Human review before export | The model proposes; a person decides. |
-| Metadata stripped from output | Shared videos should not carry home GPS coordinates. |
-| Footage, weights, secrets never committed | Enforced by a pre-commit hook and CI. |
+## 🤝 Built to be responsible
 
-## Quick start (web app)
+We think a privacy tool has to be careful about privacy itself. These are the
+principles behind every design decision:
 
-Requirements: Python 3.11+, [uv](https://docs.astral.sh/uv/), Node 20+, FFmpeg.
-A CUDA GPU is used automatically when available.
+| Principle | What it means in practice |
+|---|---|
+| **"When unsure, blur it."** | This is our team motto. If SafeFrame can't tell whether someone is a child, it blurs them. An adult being blurred by mistake is a small inconvenience. A child left visible by mistake can't be undone. |
+| **A human always decides** | The software only makes suggestions. Nothing is exported until a person has reviewed it. |
+| **Lean towards protection** | The tool deliberately blurs borderline teenagers rather than risk exposing them. |
+| **No blinking** | The blur stays in place for the whole time a person is on screen, so there is no single frame where a face slips through. |
+| **Nothing is kept** | Uploaded videos are deleted as soon as the safe copy is ready, and anything left over is wiped automatically after 24 hours. |
+| **Location stays private** | Hidden data such as the GPS location where the video was filmed is removed. |
+| **Not a surveillance tool** | SafeFrame does not identify who anyone is, store faces or build profiles. Its only purpose is to *hide* people. |
 
-```bash
-make install   # backend (uv, includes PyTorch) + frontend (npm)
-make dev       # API on :8000, UI on http://localhost:5173
-# or, production-style on a single port:
-make serve     # builds the UI and serves it from FastAPI on http://127.0.0.1:8000
-```
+### Honest limitations
 
-1. **Upload** a video. Choose whether to keep the original after export (off by default).
-2. **Watch progress** while people are detected, tracked and age-estimated.
-3. **Review.** Play the video with the blur previewed live in the browser, or
-   switch to the original with colour-coded boxes. Step through flagged
-   segments, adjust the sensitivity slider, set any person to Blur or Keep,
-   and draw extra regions over anyone who was missed.
-4. **Export** and download the MP4. The original, preview and thumbnails are
-   then deleted from the server unless you chose to keep them.
+- **It guesses age from appearance.** That guess can be wrong, especially for
+  teenagers around 16 to 19. This is why uncertain people are blurred and why the
+  human review step exists.
+- **Faces that can't be seen can't be judged.** People filmed only from behind
+  or far away are blurred to be safe, so some adults will be blurred too.
+- **Busy crowds are hard.** In very crowded scenes the tool can occasionally
+  mix people up. The review screen lets you fix this.
+- **It only works on videos you run through it.** It can't protect a child in
+  someone else's recording unless they use SafeFrame too. This is the problem our
+  next idea tries to solve (see below).
 
-## Quick start (command line)
+---
 
-```bash
-cd backend
-uv sync --all-extras           # first run downloads PyTorch
-uv run safeframe process holiday.mp4 -o holiday-safe.mp4
-```
+## 🔬 What we learned from our research
 
-```
-NOTE: age estimation is probabilistic and can be wrong. ...
-analysing  [##############################] 100.0%
-  track    1  frames      0-412    P(<18)= 0.81  face samples= 40  -> minor
-  track    2  frames      0-430    P(<18)= 0.04  face samples= 40  -> adult
-  track    5  frames    120-160    P(<18)=  n/a  face samples=  0  -> uncertain
-rendering  [##############################] 100.0%
-wrote holiday-safe.mp4  (blurred tracks: [1, 5])
-```
+As part of the IE Challenge, each team member interviewed parents and carried
+out secondary research on the market, competitors, academic studies and
+regulation. All interviewees are anonymous.
 
-Analysis and rendering can also run separately, so an analysis can be reviewed
-or edited before rendering:
+**What we heard**
 
-```bash
-uv run safeframe analyze holiday.mp4 -o analysis.json
-uv run safeframe render holiday.mp4 analysis.json -o holiday-safe.mp4 --threshold 0.3
-```
+- Parents already protect their children in small ways. They limit who can see
+  their posts, choose not to post at all, worry about photos being reused, and
+  increasingly ask their children's opinion first.
+- One parent asked other people to cover their child's face in photos. This is
+  exactly the manual, easy-to-forget request SafeFrame tries to automate.
+- The biggest worry is not what parents post themselves but **what other
+  people record and share**.
 
-Model weights are downloaded on first use to `~/.cache/safeframe/models`
-(override with `SAFEFRAME_MODEL_DIR`) and the Hugging Face cache; YuNet is
-verified against a pinned SHA-256.
+**What surprised us**
 
-## HTTP API
+- **Not every parent wants blurring.** Some told us they would rather not post
+  at all than share a blurred photo, because being recognised is part of what
+  makes a family memory special. This pushed us to make blurring a
+  *choice the person reviewing makes*, not something forced on everyone.
+- Our interviews were small and informal. They show a real need but do not yet
+  prove how many people would use or pay for a solution. We treat our ideas as
+  hypotheses to test, not facts.
 
-`uv run safeframe serve` starts the FastAPI server on `127.0.0.1:8000`
-(interactive docs at `/docs`).
+---
 
-| Method & path | Purpose |
-| --- | --- |
-| `GET /api/config` | Limits, defaults, probabilistic-estimation notice and intended-use statement |
-| `POST /api/jobs?filename=…&keep_upload=false` | Upload a video as the raw request body; starts analysis |
-| `GET /api/jobs/{id}` | Job state, stage and progress |
-| `GET /api/jobs/{id}/events` | Server-sent events stream of job progress |
-| `GET /api/jobs/{id}/analysis` | Tracks with per-frame boxes, P(under 18), face-evidence counts |
-| `GET /api/jobs/{id}/preview` | Browser-playable preview (supports range requests) |
-| `GET /api/jobs/{id}/tracks/{track}/thumbnail` | Review thumbnail for one person |
-| `POST /api/jobs/{id}/render` | `{threshold, min_face_samples, overrides, manual_regions}`; starts export |
-| `GET /api/jobs/{id}/download` | The blurred MP4 |
-| `DELETE /api/jobs/{id}` | Cancel and delete everything for the job |
+## 🚀 Where we're heading: a wearable privacy signal
 
-**Data retention.** The original upload, the preview and the thumbnails are
-deleted as soon as the export is ready unless `keep_upload=true`. Every job is
-deleted after 24 h without activity (`SAFEFRAME_JOB_TTL_HOURS`), interrupted
-jobs are deleted on restart, and `DELETE` removes everything immediately. See
-[docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) for the full lifecycle and
-configuration, and [docs/SAFETY.md](docs/SAFETY.md) for the safety case.
+SafeFrame works well when the person filming *chooses* to protect children. But
+parents told us their biggest concern is footage they don't control. Our next
+concept addresses that.
 
-SafeFrame has no user accounts and is meant to run locally or on a trusted
-self-hosted machine; put authentication in front of it before exposing it.
+> **The idea:** an optional **wristband or badge** that a child (or anyone) can
+> wear to say *"please don't show me."* Cameras, apps and social-media
+> platforms that support it would automatically blur the wearer, and only the
+> wearer.
 
-## Limitations
+**Why it could matter**
 
-- **Apparent age is not age.** Expect errors around 13–20 in particular.
-- **No face, no evidence.** People seen only from behind or far away stay
-  *uncertain* (and therefore blurred) — by design, but it means some adults will
-  be blurred too.
-- **Missed detections.** Very small, heavily occluded or unusually posed people
-  may not be detected at all. The review screen lets you add manual regions.
-- **Identity switches.** In dense crowds, trackers can swap IDs when people
-  cross. Interpolation and padding reduce, but do not eliminate, the effect.
-- **Variable frame rate** input is rendered at its average frame rate.
+- A privacy request that **doesn't rely on people remembering** to ask or to
+  respect it.
+- **Selective protection.** Only the people who opt in are hidden, and everyone
+  else in the video stays visible.
+- **Shared responsibility.** Families, technology companies and platforms all
+  play a part instead of parents carrying the burden alone.
 
-## Model licences
+**How it could be adopted**
 
-SafeFrame's code is MIT licensed. The models it downloads have their own terms:
-Ultralytics YOLO (AGPL-3.0 or Ultralytics Enterprise licence), OpenCV YuNet
-(MIT), and `nateraw/vit-age-classifier` (see its model card; trained on FairFace,
-CC BY 4.0). Review these before any commercial deployment.
+| Role | Who |
+|---|---|
+| Decision-makers | Parents and guardians |
+| Wearers and beneficiaries | Children, who should have an age-appropriate voice in the choice |
+| Pilot customers | Schools, sports clubs and event organisers |
+| Implementation partners | Camera makers, recording apps and social-media platforms |
+| Policy audience | Legislators and regulators |
 
-## Development
+**What we still need to test.** This is a working proposal, not a finished
+product. Before going further we want to find out:
 
-See [CONTRIBUTING.md](CONTRIBUTING.md) for the branching model, commit
-conventions and data-handling rules.
+1. **Need:** Would families actually use a wristband, and how do children feel
+   about wearing one?
+2. **Acceptance:** Could it feel inconvenient or stigmatising, or give people
+   false confidence?
+3. **Feasibility:** Can the signal reliably be matched to the right person in a
+   crowd?
+4. **Safety:** How do we stop the signal itself from being used to track a
+   child?
+5. **Adoption:** What would convince platforms and device makers to support it?
 
-```bash
-make test          # backend (synthetic video, no model downloads) + frontend suites
-make test-models   # real-model smoke test (downloads YOLO, YuNet, ViT)
-make lint
-```
+SafeFrame, the tool in this repository, is our working first step. It shows
+that automatically finding and blurring the right people in a video is
+possible today.
 
-## License
+---
 
-[MIT](LICENSE) © 2026 Issam Arida
+## 🌍 Social impact
+
+- **Protects children's privacy by default**, at the moment it matters most:
+  before a video is shared.
+- **Gives children a voice** in how their image is used, in line with the UN
+  Convention on the Rights of the Child (Article 16, the right to privacy).<sup>[8]</sup>
+- **Makes responsible sharing easy** for schools, clubs and families, turning a
+  task almost nobody does today into one that takes minutes.
+- **Reduces long-term risks** that stay with a child's digital footprint, from
+  embarrassment and bullying to identity fraud.
+
+---
+
+## 👥 The team: SafeFrame Crew
+
+| Name | Role |
+|---|---|
+| **Javier Cruz Villarreal** | Project coordinator |
+| **Issam Arida** | Research and interviews lead |
+| **Christoph Rintz** | Backend and AI lead |
+| **Kiril Petrovski** | Frontend (user interface) lead |
+| **Xander Nainoa Chen** | Quality, documentation and safety review lead |
+| **Jamie Blewett** | Presentation lead |
+
+---
+
+## 📚 Sources
+
+1. Nominet / The Parent Zone, *Share with Care* survey of 2,000 UK parents (2016). [nominet.uk](https://nominet.uk/news/parents-oversharing-family-photos-online-but-lack-basic-privacy-know-how/)
+2. AVG Technologies, *Digital Birth* study of 2,200 mothers in 10 countries (2010). [PCWorld coverage](https://www.pcworld.com/article/503775/nine_of_ten_us_kids_have_online_presence_by_age_two_study.html)
+3. C.S. Mott Children's Hospital, *National Poll on Children's Health: Parents on social media* (2015). [mottpoll.org (PDF)](https://www.mottpoll.org/sites/default/files/documents/031615_sharenting_0.pdf)
+4. Hiniker, Schoenebeck & Kientz, *Not at the Dinner Table: Parents' and Children's Perspectives on Family Technology Rules*, University of Washington and University of Michigan, 249 families (2016). [ScienceDaily](https://www.sciencedaily.com/releases/2016/03/160308135122.htm)
+5. Barclays forecast on "sharenting" and identity fraud (2018). [4NI coverage](https://www.4ni.co.uk/northern-ireland-news/244952/sharenting-major-risk-to-children-s-future-financial-security)
+6. General Data Protection Regulation (EU) 2016/679, Recital 38. [gdpr-info.eu](https://gdpr-info.eu/recitals/no-38/)
+7. French Law No. 2024-120 of 19 February 2024 on children's image rights. [Bird & Bird summary](https://www.twobirds.com/en/insights/2024/france/new-legal-framework-for-childrens-privacy)
+8. UN Convention on the Rights of the Child, Article 16. [ohchr.org](https://www.ohchr.org/en/instruments-mechanisms/instruments/convention-rights-child)
+
+*AI acknowledgement: Claude (Anthropic) helped restructure this page from the
+team's existing project materials and research documents, and helped find and
+check the statistics above. The team reviewed the final content.*
+
+---
+
+<div align="center">
+
+**For developers:** setup, architecture and technical details are in
+**[docs/TECHNICAL.md](docs/TECHNICAL.md)**.
+
+<sub>SafeFrame is open source under the <a href="LICENSE">MIT licence</a>.</sub>
+
+</div>
