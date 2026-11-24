@@ -1,7 +1,7 @@
 # Contributing to SafeFrame
 
-Thanks for helping protect children's privacy in shared video. This document
-describes how work flows through the repository.
+Thanks for helping people, children first, stay out of images they asked not
+to be in. This document describes how work flows through the repository.
 
 ## Branching model
 
@@ -31,9 +31,9 @@ request, require the `CI` workflow to pass, and disallow force pushes.
 Use [Conventional Commits](https://www.conventionalcommits.org):
 
 ```
-feat(pipeline): aggregate age evidence per track
+feat(band): detect markers in zoomed wrist crops
 fix(api): reject uploads that ffprobe cannot parse
-docs: explain probabilistic age estimation
+docs: explain guarded zones
 ```
 
 Types: `feat`, `fix`, `perf`, `refactor`, `test`, `docs`, `chore`, `ci`, `build`.
@@ -52,22 +52,28 @@ and testing notes.
 
 ## Data handling
 
-SafeFrame exists to protect children, so the repository is held to a strict standard:
+SafeFrame exists to protect people who asked not to be shown, so the
+repository is held to a strict standard:
 
 - **Never commit footage.** No video or audio files of any kind, including
   "harmless" test clips. Tests synthesise their own video with FFmpeg at runtime.
+- **Never commit sealed envelopes or trustee shares.** An `.sfseal` file is
+  still the unblurred original; a share is part of the key that opens every
+  envelope. `escrow.pub.json` is public and fine.
 - **Never commit model weights.** They are downloaded on first use into a cache
   outside the repository, with checksums verified where the source is pinned.
 - **Never commit secrets.** Use environment variables; `.env.example` documents them.
 - **Never paste footage, frames or faces into issues or pull requests.**
   Describe the scenario instead (e.g. "two people, one turns away for ~1 s").
 
-`scripts/check_forbidden_files.py` enforces the first three rules in both the
+`scripts/check_forbidden_files.py` enforces the first four rules in both the
 pre-commit hook and CI.
 
 ## Pull request checklist
 
 See [.github/PULL_REQUEST_TEMPLATE.md](.github/PULL_REQUEST_TEMPLATE.md).
 Changes that affect what gets blurred must describe how they shift the balance
-between missed minors (privacy failure) and over-blurring (usability cost) —
-SafeFrame always errs toward blurring.
+between missed wearers (privacy failure) and over-blurring (usability cost);
+SafeFrame errs toward blurring. Changes that affect guarded zones, sealing or
+what is stored must also describe the effect on abuse resistance (can the
+band become a disguise or a tracking beacon?). See [docs/SAFETY.md](docs/SAFETY.md).
