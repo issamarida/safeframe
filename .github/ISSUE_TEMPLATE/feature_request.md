@@ -8,4 +8,4 @@ labels: enhancement
 
 **Proposed solution**
 
-**Safety considerations** (could this cause a minor to be missed, or data to be retained?)
+**Safety considerations** (could this cause a band wearer to be missed, data to be retained, or the band to be used as a disguise or to track someone?)

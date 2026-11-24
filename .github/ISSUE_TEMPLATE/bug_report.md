@@ -10,8 +10,8 @@ labels: bug
 
 **What you expected**
 
-**Scene description** (number of people, approximate ages, lighting, motion, occlusions)
+**Scene description** (number of people, who wore a band and where, approximate distance, lighting, motion, occlusions; guarded place or event mode?)
 
-**Video properties** (resolution, frame rate, codec, duration — `ffprobe` output is ideal)
+**File properties** (photo or video; resolution, frame rate, codec, duration — `ffprobe` output is ideal)
 
 **Environment** (OS, GPU/CPU, browser)
