@@ -6,6 +6,8 @@ All notable changes to this project are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-24
+
 SafeFrame is now built around the **SafeFrame Band**: people are blurred
 because they wear a band that asks not to be shown, not because a model
 guessed their age.
@@ -109,5 +111,6 @@ First release.
 - `lap` is declared in the `[ml]` extra so Ultralytics no longer pip-installs
   it into the environment at runtime.
 
-[Unreleased]: https://github.com/issamarida/safeframe/compare/v0.1.0...develop
+[Unreleased]: https://github.com/issamarida/safeframe/compare/v0.2.0...develop
+[0.2.0]: https://github.com/issamarida/safeframe/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/issamarida/safeframe/releases/tag/v0.1.0

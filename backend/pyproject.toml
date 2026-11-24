@@ -1,6 +1,6 @@
 [project]
 name = "safeframe"
-version = "0.1.0"
+version = "0.2.0"
 description = "Blur everyone wearing a SafeFrame Band in photos and video, with abuse-resistant rules for guarded places."
 license = { text = "MIT" }
 authors = [{ name = "Issam Arida", email = "issamaarida@gmail.com" }]

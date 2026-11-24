@@ -205,7 +205,7 @@ dev machine has the full ML stack with CUDA.
 ## Status (2026-11-24)
 
 - **v0.1.0** (tag on `main`): age-based blurring, silhouette blur.
-- **v0.2.0** (this rework): band, attribution, guarded zones, sealed originals,
+- **v0.2.0** (tag on `main`, the band rework): band, attribution, guarded zones, sealed originals,
   photos, event mode, review UI, protocol and docs. Backend 165 fast tests +
   3 real-model tests; frontend 57 tests.
 - Verified with real models: on `bus.jpg` at ~14 MP with a band composited at a

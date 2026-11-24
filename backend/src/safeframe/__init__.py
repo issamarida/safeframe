@@ -6,4 +6,4 @@ unblurred original can be sealed so that only a quorum of independent
 trustees can ever open it.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"
