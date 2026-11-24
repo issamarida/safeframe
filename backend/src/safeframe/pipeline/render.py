@@ -8,9 +8,11 @@ from collections.abc import Callable, Iterable, Mapping
 from dataclasses import dataclass, field
 from pathlib import Path
 
+import cv2
+
 from safeframe.pipeline.anonymize import DEFAULT_PADDING, ProtectedRegion, anonymize_frame
 from safeframe.pipeline.interfaces import Cancelled, CancelToken
-from safeframe.pipeline.policy import DecisionPolicy, Override
+from safeframe.pipeline.policy import Decision, DecisionPolicy, Override
 from safeframe.pipeline.types import Analysis, Box, ManualRegion
 from safeframe.video.io import VideoWriter, iter_frames
 
@@ -25,6 +27,17 @@ class RenderPlan:
     regions: dict[int, list[ProtectedRegion]] = field(default_factory=dict)
     blurred_tracks: list[int] = field(default_factory=list)
     kept_tracks: list[int] = field(default_factory=list)
+    # track -> why: a Decision value, or "override:blur" / "override:keep".
+    reasons: dict[int, str] = field(default_factory=dict)
+
+    @property
+    def honoured_bands(self) -> list[int]:
+        """Blurred tracks that were protected because of a band."""
+        return [
+            t
+            for t in self.blurred_tracks
+            if self.reasons.get(t) in {Decision.WEARER.value, Decision.POSSIBLE.value}
+        ]
 
     def regions_for(self, frame: int) -> list[ProtectedRegion]:
         return self.regions.get(frame, [])
@@ -61,7 +74,11 @@ def plan_render(
     regions: dict[int, list[ProtectedRegion]] = defaultdict(list)
     plan = RenderPlan()
     for track in analysis.tracks:
-        if policy.should_blur(track, overrides.get(track.track_id)):
+        override = overrides.get(track.track_id)
+        plan.reasons[track.track_id] = (
+            f"override:{override.value}" if override else policy.classify(track).value
+        )
+        if policy.should_blur(track, override):
             plan.blurred_tracks.append(track.track_id)
             for frame in sorted(track.boxes):
                 regions[frame].append(
@@ -125,3 +142,38 @@ def render_video(
                 progress(min(0.999, (index + 1) / total))
     if progress is not None:
         progress(1.0)
+
+
+PHOTO_SUFFIXES = {".jpg", ".jpeg", ".png", ".webp"}
+
+
+def render_photo(
+    source: Path,
+    output: Path,
+    analysis: Analysis,
+    plan: RenderPlan,
+    padding: float = DEFAULT_PADDING,
+) -> None:
+    """Write ``output`` (JPEG, PNG or WebP by extension) with every region blurred.
+
+    The image is decoded upright and re-encoded without any metadata, so EXIF
+    GPS, device and orientation tags never reach the shared copy.
+    """
+    from safeframe.pipeline.analyze import read_photo
+
+    frame = read_photo(source)
+    h, w = frame.shape[:2]
+    if (w, h) != (analysis.video.width, analysis.video.height):
+        raise RenderError("the photo does not match its analysis")
+    regions = plan.regions_for(0)
+    if regions:
+        _check_protectable(0, regions, w, h)
+        anonymize_frame(frame, regions, padding)
+    suffix = output.suffix.lower()
+    if suffix not in PHOTO_SUFFIXES:
+        raise RenderError(f"unsupported photo format {suffix!r}")
+    params = {".jpg": [cv2.IMWRITE_JPEG_QUALITY, 95], ".jpeg": [cv2.IMWRITE_JPEG_QUALITY, 95]}
+    ok, buf = cv2.imencode(suffix, frame, params.get(suffix, []))
+    if not ok:
+        raise RenderError("could not encode the photo")
+    output.write_bytes(buf.tobytes())
