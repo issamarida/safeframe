@@ -1,7 +1,7 @@
 [project]
 name = "safeframe"
 version = "0.1.0"
-description = "Blur people estimated to be under 18 in video, with human review before export."
+description = "Blur everyone wearing a SafeFrame Band in photos and video, with abuse-resistant rules for guarded places."
 license = { text = "MIT" }
 authors = [{ name = "Issam Arida", email = "issamaarida@gmail.com" }]
 requires-python = ">=3.11"
@@ -12,6 +12,10 @@ dependencies = [
   "uvicorn[standard]>=0.30",
   "pydantic>=2.7",
   "pydantic-settings>=2.4",
+  # Sealed originals: X25519 + HKDF + AES-256-GCM.
+  "cryptography>=43",
+  # EXIF GPS for guarded-zone matching on photos.
+  "pillow>=10",
 ]
 
 [project.optional-dependencies]
@@ -23,7 +27,6 @@ ml = [
   "lap>=0.5.12",
   "torch>=2.4",
   "transformers>=4.44",
-  "pillow>=10",
 ]
 
 [project.scripts]

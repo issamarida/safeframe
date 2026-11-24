@@ -6,19 +6,24 @@ from enum import StrEnum
 
 from pydantic import BaseModel, Field, model_validator
 
-from safeframe.pipeline.policy import DEFAULT_MIN_FACE_SAMPLES, DEFAULT_THRESHOLD, Override
+from safeframe.pipeline.policy import (
+    DEFAULT_MIN_BAND_HITS,
+    DEFAULT_MIN_FACE_SAMPLES,
+    DEFAULT_THRESHOLD,
+    Override,
+)
 
-PROBABILISTIC_NOTICE = (
-    "Age estimation is probabilistic. SafeFrame estimates apparent age from visible "
-    "faces and can be wrong, especially for teenagers, for people whose faces are "
-    "small, turned away or partly hidden, and across demographic groups. Anyone it "
-    "cannot confidently judge to be an adult is blurred by default. Always review the "
-    "result before sharing."
+NOTICE = (
+    "SafeFrame blurs everyone it sees wearing a SafeFrame Band, for every frame they "
+    "appear in. It can only honour a band it can see: a band hidden for the whole clip, "
+    "too small or too blurry cannot protect anyone. Always review the result before "
+    "sharing, and blur anyone else who asked not to be shown."
 )
 INTENDED_USE = (
-    "SafeFrame is intended to protect children's privacy in video you share. It is not "
-    "an age-verification system and must not be used to identify, profile or make "
-    "decisions about people."
+    "SafeFrame honours a wearer's request not to be shown in photos and videos that are "
+    "shared. It is not a surveillance or identification tool, and the band is not a "
+    "disguise: security cameras never honour it, and in guarded places such as banks, "
+    "courts and airports it protects only people who look like children."
 )
 
 
@@ -43,6 +48,16 @@ class VideoInfoOut(BaseModel):
     frame_count: int
     duration: float
     has_audio: bool
+    media: str = "video"
+
+
+class ContextOut(BaseModel):
+    guarded: bool = False
+    guarded_source: str = "none"
+    zone_name: str | None = None
+    zone_kind: str | None = None
+    protect_minors: bool = False
+    had_location: bool = False
 
 
 class JobOut(BaseModel):
@@ -59,6 +74,9 @@ class JobOut(BaseModel):
     updated_at: float
     expires_at: float
     video: VideoInfoOut | None = None
+    media: str = "video"
+    context: ContextOut = Field(default_factory=ContextOut)
+    sealed_ready: bool = False
 
 
 class ManualRegionIn(BaseModel):
@@ -80,6 +98,7 @@ class ManualRegionIn(BaseModel):
 class RenderRequest(BaseModel):
     threshold: float = Field(DEFAULT_THRESHOLD, ge=0, le=1)
     min_face_samples: int = Field(DEFAULT_MIN_FACE_SAMPLES, ge=1, le=100)
+    min_band_hits: int = Field(DEFAULT_MIN_BAND_HITS, ge=1, le=100)
     # Track id (as string, JSON object keys) -> forced decision.
     overrides: dict[int, Override] = Field(default_factory=dict)
     manual_regions: list[ManualRegionIn] = Field(default_factory=list, max_length=1000)
@@ -91,5 +110,9 @@ class AppConfigOut(BaseModel):
     job_ttl_hours: float
     default_threshold: float
     default_min_face_samples: int
-    notice: str = PROBABILISTIC_NOTICE
+    default_min_band_hits: int
+    sealing_enabled: bool
+    seal_retention_days: float
+    band_spec_version: int
+    notice: str = NOTICE
     intended_use: str = INTENDED_USE

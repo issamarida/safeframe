@@ -1,8 +1,10 @@
 #!/usr/bin/env python3
 """Fail if footage, model weights, or likely secrets are about to be committed.
 
-SafeFrame processes video of children. Footage must never reach version
-control, and neither should model weights (licensing, size) or credentials.
+SafeFrame processes photos and video of people who asked not to be shown.
+Footage must never reach version control: not raw, not sealed (an envelope
+is still the unblurred original), and neither should trustee key shares,
+model weights (licensing, size) or credentials.
 This check runs as a pre-commit hook (on staged files) and in CI (on every
 tracked file), so a mistake is caught even if a contributor skips the hook.
 
@@ -26,6 +28,7 @@ WEIGHT_EXT = {
     ".pt", ".pth", ".onnx", ".engine", ".tflite", ".caffemodel",
     ".safetensors", ".bin", ".ckpt", ".h5", ".pb",
 }
+SEALED_EXT = {".sfseal"}
 SECRET_NAMES = re.compile(r"(^|/)(\.env(\..+)?|.*\.pem|.*\.key|id_rsa|id_ed25519)$")
 ALLOWED_SECRET_NAMES = {".env.example"}
 
@@ -35,6 +38,8 @@ SECRET_PATTERNS = [
     re.compile(rb"gh[pousr]_[A-Za-z0-9]{36,}"),  # GitHub tokens
     re.compile(rb"hf_[A-Za-z0-9]{30,}"),  # Hugging Face tokens
     re.compile(rb"sk-[A-Za-z0-9_-]{32,}"),  # generic API secret keys
+    re.compile(rb'"scheme":\s*"safeframe-shamir'),  # a trustee's key share
+    re.compile(rb"\ASFSEAL1\n"),  # a sealed original, whatever its name
 ]
 
 MAX_BYTES = 2 * 1024 * 1024  # anything larger than 2 MiB needs a very good reason
@@ -49,6 +54,9 @@ def problems_for(path: Path) -> list[str]:
         pass  # TypeScript source, not an MPEG transport stream
     elif suffix in FOOTAGE_EXT or suffix == ".ts":
         found.append("video/audio footage must never be committed")
+
+    if suffix in SEALED_EXT:
+        found.append("sealed originals are unblurred footage and must never be committed")
 
     if suffix in WEIGHT_EXT:
         found.append("model weights must never be committed (they are downloaded at runtime)")
