@@ -18,6 +18,13 @@ from pathlib import Path
 
 log = logging.getLogger(__name__)
 
+# Default person model for both the CLI and the server: YOLO11 nano instance
+# segmentation (boxes for tracking + a silhouette per person). Downloaded by
+# Ultralytics into model_dir() on first use; never committed. Override with
+# ``--yolo`` or ``SAFEFRAME_YOLO_WEIGHTS``; detection-only checkpoints such as
+# "yolo11n.pt" remain supported and fall back to rectangular blur.
+DEFAULT_YOLO_WEIGHTS = "yolo11n-seg.pt"
+
 
 def model_dir() -> Path:
     root = os.environ.get("SAFEFRAME_MODEL_DIR") or Path.home() / ".cache" / "safeframe" / "models"

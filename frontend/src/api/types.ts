@@ -46,6 +46,14 @@ export interface AppConfig {
 /** [frame, x1, y1, x2, y2, interpolated(0|1)] in source-video pixels. */
 export type BoxRow = [number, number, number, number, number, number];
 
+/**
+ * Silhouette coverage on one observed frame (see backend pipeline/masks.py):
+ * [frame, x, y, width, height, runs]. Integer source pixels, half-open crop.
+ * `runs` alternate background/foreground row-major, starting with background
+ * (first run may be 0), and sum to width * height.
+ */
+export type MaskRow = [number, number, number, number, number, number[]];
+
 export interface TrackData {
   track_id: number;
   first_frame: number;
@@ -55,6 +63,8 @@ export interface TrackData {
   face_samples: number;
   peak_confidence: number;
   boxes: BoxRow[];
+  /** Optional; absent on legacy analyses and box-only models. */
+  masks_v1?: MaskRow[];
 }
 
 export interface AnalysisData {

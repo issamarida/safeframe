@@ -6,6 +6,10 @@ tool every missed frame is a leak, so we:
 
 1. linearly interpolate boxes across short gaps inside a track, and
 2. pad each track a few frames before its first and after its last detection.
+
+Synthetic (interpolated or padded) frames get a box but never a silhouette:
+copying a mask to a new position could leave part of the person uncovered, so
+those frames are blurred with the padded box instead.
 """
 
 from __future__ import annotations

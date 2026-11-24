@@ -14,6 +14,7 @@ import logging
 import sys
 from pathlib import Path
 
+from safeframe.models import DEFAULT_YOLO_WEIGHTS
 from safeframe.pipeline.policy import DEFAULT_MIN_FACE_SAMPLES, DEFAULT_THRESHOLD, DecisionPolicy
 
 NOTICE = (
@@ -47,6 +48,14 @@ def _summarise(analysis, policy) -> None:
         )
 
 
+def _coverage(plan) -> None:
+    s = plan.coverage_stats()
+    print(
+        f"protected person-frames: {s['mask']} by silhouette, {s['box']} by box fallback"
+        + (f"; {s['manual']} manual region-frames" if s["manual"] else "")
+    )
+
+
 def _analyze(path: Path, args):
     from safeframe.pipeline.analyze import analyze_video
     from safeframe.pipeline.factory import ModelBundle, ModelConfig
@@ -70,6 +79,7 @@ def cmd_process(args) -> int:
     plan = plan_render(analysis, policy)
     render_video(args.input, args.output, analysis, plan, progress=_bar("rendering"))
     print(f"wrote {args.output}  (blurred tracks: {plan.blurred_tracks or 'none'})")
+    _coverage(plan)
     return 0
 
 
@@ -89,6 +99,7 @@ def cmd_render(args) -> int:
     plan = plan_render(analysis, _policy(args))
     render_video(args.input, args.output, analysis, plan, progress=_bar("rendering"))
     print(f"wrote {args.output}")
+    _coverage(plan)
     return 0
 
 
@@ -121,7 +132,12 @@ def build_parser() -> argparse.ArgumentParser:
             help="face observations needed before a person can be judged an adult",
         )
         if with_models:
-            p.add_argument("--yolo", default="yolo11n.pt", help="YOLO weights name or path")
+            p.add_argument(
+                "--yolo",
+                default=DEFAULT_YOLO_WEIGHTS,
+                help=f"YOLO weights name or path (default {DEFAULT_YOLO_WEIGHTS}; a "
+                "detection-only model such as yolo11n.pt blurs rectangles instead of silhouettes)",
+            )
             p.add_argument("--device", default=None, help="cpu, cuda, cuda:0, mps (default: auto)")
 
     p = sub.add_parser("process", help="analyse and render in one step")

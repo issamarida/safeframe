@@ -4,6 +4,28 @@ All notable changes to this project are documented here. The format follows
 [Keep a Changelog](https://keepachangelog.com/en/1.1.0/) and the project uses
 [Semantic Versioning](https://semver.org/).
 
+## [Unreleased]
+
+### Changed
+- People are blurred to their **silhouette** instead of their bounding box, so
+  the background inside the box stays visible. The default person model is now
+  `yolo11n-seg.pt` (instance segmentation, same tracker and ReID).
+  Detection-only checkpoints such as `yolo11n.pt` still work and blur rectangles.
+- Frames without a usable silhouette (interpolated gaps, padded ends, rejected
+  or missing masks, over-budget masks, legacy analyses) fall back to the padded
+  rectangle, in both the export and the review preview.
+- Overlapping regions are each computed from the untouched frame, so they no
+  longer blur already-blurred pixels.
+
+### Added
+- Optional `masks_v1` field on each track in the analysis JSON (validated,
+  budgeted run-length encoding); legacy box-only analyses still load and render.
+- Export fails, leaving no output, if a planned region has neither a usable
+  mask nor a valid box.
+- The CLI and job log report silhouette vs. box-fallback person-frames; the
+  review screen labels each blurred person `silhouette` or `box` per frame.
+- The analysis endpoint is gzip-compressed when the client accepts it.
+
 ## [0.1.0] — 2026-10-13
 
 First release.

@@ -10,11 +10,18 @@ import pytest
 from safeframe.pipeline.analyze import AnalysisSettings, analyze_video
 from safeframe.pipeline.interfaces import Cancelled
 from safeframe.pipeline.policy import DecisionPolicy, Override
-from safeframe.pipeline.render import plan_render, render_video
-from safeframe.pipeline.types import Box, ManualRegion, TrackStatus
+from safeframe.pipeline.render import RenderError, plan_render, render_video
+from safeframe.pipeline.types import Analysis, Box, ManualRegion, TrackStatus
 from safeframe.video.io import iter_frames, probe
 
-from .conftest import HeadFaceDetector, ScriptedTracker, SizeAgeEstimator, person, requires_ffmpeg
+from .conftest import (
+    HeadFaceDetector,
+    ScriptedTracker,
+    SizeAgeEstimator,
+    ellipse_mask,
+    person,
+    requires_ffmpeg,
+)
 
 pytestmark = requires_ffmpeg
 
@@ -167,4 +174,111 @@ def test_cancel_stops_render_and_removes_partial_output(make_video, tmp_path):
     cancel.set()
     with pytest.raises(Cancelled):
         render_video(source, out, analysis, plan_render(analysis, DecisionPolicy()), cancel=cancel)
+    assert not out.exists()
+
+
+# --- silhouettes ------------------------------------------------------------------
+
+SIL_FRAMES = 45  # track observed on 0..44, padded to 50 by pad_seconds
+NO_MASK = range(10, 15)  # observed, but the model gave no usable mask
+GAP = range(20, 25)  # not observed: interpolated
+
+
+def _moving_box(f: int) -> Box:
+    x = 20 + 2 * f
+    return Box(x, 40, x + 80, 220)
+
+
+def _silhouette_script():
+    script = {}
+    for f in range(SIL_FRAMES):
+        if f in GAP:
+            script[f] = []
+            continue
+        box = _moving_box(f)
+        mask = None if f in NO_MASK else ellipse_mask(box, 320, 240)
+        script[f] = [person(CHILD, box.x1, box.y1, box.x2, box.y2, mask=mask)]
+    return script
+
+
+def _analyze_silhouettes(video):
+    tracker = ScriptedTracker(_silhouette_script())
+    faces = HeadFaceDetector(tracker, face_sizes={CHILD: 34})
+    return analyze_video(
+        video, tracker, faces, SizeAgeEstimator(60), AnalysisSettings(age_every=1)
+    ).analysis
+
+
+def test_mask_frames_and_box_fallback_frames_are_planned(make_video):
+    analysis = _analyze_silhouettes(make_video())
+    track = analysis.tracks[0]
+    observed = set(range(SIL_FRAMES)) - set(GAP)
+    assert set(track.masks) == observed - set(NO_MASK)
+    plan = plan_render(analysis, DecisionPolicy())
+    for f in range(50):
+        regions = plan.regions_for(f)
+        # Every frame of the (padded, interpolated) track is protected...
+        assert len(regions) == 1, f
+        # ...by silhouette only where one was observed for that very frame.
+        expect_mask = f in observed and f not in NO_MASK
+        assert (regions[0].mask is not None) == expect_mask, f
+        assert regions[0].box == track.boxes[f]
+    stats = plan.coverage_stats()
+    assert stats == {"mask": len(observed) - len(NO_MASK), "box": 50 - stats["mask"], "manual": 0}
+
+
+def _corner(frame, f):
+    # Interpolation is linear, so the gap matches _moving_box; padded ends hold the last box.
+    b = _moving_box(min(f, SIL_FRAMES - 1))
+    x, y = int(b.x1), int(b.y1)
+    return frame[y + 2 : y + 8, x + 2 : x + 8]
+
+
+def _centre(frame, f):
+    b = _moving_box(f)
+    cx, cy = (int(v) for v in b.center)
+    return frame[cy - 20 : cy + 20, cx - 12 : cx + 12]
+
+
+def test_render_silhouette_with_fallback_end_to_end(make_video, tmp_path):
+    source = make_video(size="320x240")
+    analysis = _analyze_silhouettes(source)
+    # CLI-style persistence: JSON on disk, loaded back for render.
+    path = tmp_path / "analysis.json"
+    path.write_text(json.dumps(analysis.to_dict()))
+    loaded = Analysis.from_dict(json.loads(path.read_text()))
+    assert loaded.mask_count == analysis.mask_count > 0
+    out = tmp_path / "out.mp4"
+    render_video(source, out, loaded, plan_render(loaded, DecisionPolicy()))
+    src, dst = dict(iter_frames(source)), dict(iter_frames(out))
+
+    for f in (3, 30, 40):  # good silhouette frames
+        assert _channel_spread(_centre(dst[f], f)) < 4, f"person not blurred at {f}"
+        before, after = _corner(src[f], f).astype(int), _corner(dst[f], f).astype(int)
+        assert _channel_spread(before) > 10  # the background there is colourful
+        assert np.abs(after - before).mean() < 8, f"background at box corner altered at {f}"
+    for f in (12, 22, 47):  # missing mask, interpolated gap, padded end
+        assert _channel_spread(_corner(dst[f], f)) < 4, f"no box fallback at {f}"
+        assert _channel_spread(_centre(dst[f], min(f, SIL_FRAMES - 1))) < 4
+
+    # A legacy (box-only) analysis of the same video renders rectangles.
+    legacy = analysis.to_dict()
+    for t in legacy["tracks"]:
+        t.pop("masks_v1", None)
+    legacy_analysis = Analysis.from_dict(legacy)
+    assert legacy_analysis.mask_count == 0
+    out2 = tmp_path / "legacy.mp4"
+    render_video(source, out2, legacy_analysis, plan_render(legacy_analysis, DecisionPolicy()))
+    legacy_frames = dict(iter_frames(out2))
+    assert _channel_spread(_corner(legacy_frames[3], 3)) < 4
+
+
+def test_unprotectable_region_fails_render_without_output(make_video, tmp_path):
+    source = make_video()
+    analysis = _analyze(source).analysis
+    child = next(t for t in analysis.tracks if t.track_id == CHILD)
+    child.boxes[5] = Box(float("nan"), 0, 10, 10)
+    out = tmp_path / "out.mp4"
+    with pytest.raises(RenderError, match="frame 5"):
+        render_video(source, out, analysis, plan_render(analysis, DecisionPolicy()))
     assert not out.exists()

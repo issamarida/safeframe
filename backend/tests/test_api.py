@@ -11,13 +11,30 @@ from safeframe.api.app import create_app
 from safeframe.config import Settings
 from safeframe.video.io import probe
 
-from .conftest import HeadFaceDetector, ScriptedTracker, SizeAgeEstimator, person, requires_ffmpeg
+from .conftest import (
+    HeadFaceDetector,
+    ScriptedTracker,
+    SizeAgeEstimator,
+    ellipse_mask,
+    person,
+    requires_ffmpeg,
+)
 
 pytestmark = requires_ffmpeg
 
 
 def _components():
-    script = {f: [person(1, 20, 40, 100, 220), person(2, 180, 20, 300, 230)] for f in range(50)}
+    from safeframe.pipeline.types import Box
+
+    child_mask = ellipse_mask(Box(20, 40, 100, 220), 320, 240)
+    # The child has a silhouette except on frames 10-14 (box fallback).
+    script = {
+        f: [
+            person(1, 20, 40, 100, 220, mask=None if 10 <= f < 15 else child_mask),
+            person(2, 180, 20, 300, 230),
+        ]
+        for f in range(50)
+    }
     tracker = ScriptedTracker(script)
     return tracker, HeadFaceDetector(tracker, {1: 34, 2: 50}), SizeAgeEstimator(60)
 
@@ -201,3 +218,37 @@ def test_restart_recovers_finished_jobs_and_drops_interrupted(settings, make_vid
     with TestClient(create_app(settings, components=_components)) as client:
         assert client.get(f"/api/jobs/{jid}").json()["state"] == "review"
         assert not interrupted.exists()
+
+
+def test_analysis_serves_validated_masks_gzipped(client, make_video, settings):
+    import json
+
+    job = _wait(client, _upload(client, make_video(), keep=True)["id"], "review")
+    jid = job["id"]
+    r = client.get(f"/api/jobs/{jid}/analysis")
+    body = r.json()
+    child = next(t for t in body["tracks"] if t["track_id"] == 1)
+    adult = next(t for t in body["tracks"] if t["track_id"] == 2)
+    frames = [row[0] for row in child["masks_v1"]]
+    assert frames == [f for f in range(50) if not 10 <= f < 15]
+    assert "masks_v1" not in adult  # box-only person
+    _frame, x, y, w, h, runs = child["masks_v1"][0]
+    assert sum(runs) == w * h and x >= 0 and x + w <= 320 and y + h <= 240
+
+    # Large payloads are compressed when the client accepts it.
+    headers = client.get(f"/api/jobs/{jid}/analysis", headers={"Accept-Encoding": "gzip"}).headers
+    assert headers.get("content-encoding") == "gzip"
+    # A tampered analysis on disk is validated, not trusted: bad rows are dropped.
+    path = settings.jobs_dir / jid / "analysis.json"
+    data = json.loads(path.read_text())
+    data["tracks"][0]["masks_v1"][0][5] = [1, 2, 3]
+    path.write_text(json.dumps(data))
+    child = next(
+        t for t in client.get(f"/api/jobs/{jid}/analysis").json()["tracks"] if t["track_id"] == 1
+    )
+    assert child["masks_v1"][0][0] == 1
+
+    # Rendering the tampered analysis still protects frame 0 (box fallback).
+    r = client.post(f"/api/jobs/{jid}/render", json={})
+    assert r.status_code == 202
+    _wait(client, jid, "done")

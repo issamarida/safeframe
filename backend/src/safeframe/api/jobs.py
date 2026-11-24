@@ -316,6 +316,13 @@ class JobManager:
                 job.progress = fraction
                 job.touch()
 
+            stats = plan.coverage_stats()
+            log.info(
+                "job %s: rendering %d silhouette and %d box-fallback person-frames",
+                job.id,
+                stats["mask"],
+                stats["box"],
+            )
             render_video(job.upload_path, tmp, analysis, plan, progress=progress, cancel=job.cancel)
             tmp.replace(job.output_path)
             if not job.keep_upload:

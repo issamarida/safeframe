@@ -56,6 +56,9 @@ Back-of-head shots, profiles, sunglasses, distance, motion blur.
   region is destroyed), and the region is padded by 8 %.
 - Blurred regions are then converted to greyscale, removing skin-tone and
   clothing-colour cues.
+- With silhouette blur only the pixels inside a person's outline (plus a
+  margin of 3–24 px scaled to their size) are blurred, so less of the frame is
+  obscured than with rectangles. See section 6.
 - Note: blur is not encryption. For high-risk contexts, a solid fill is safer;
   this is a planned option.
 
@@ -71,7 +74,36 @@ Back-of-head shots, profiles, sunglasses, distance, motion blur.
   to reveal them.
 - The repository refuses footage, weights and secrets (pre-commit + CI).
 
-### 6. Misuse
+### 6. The silhouette misses part of a person
+
+A segmentation mask is a model output: it can omit a raised hand, hair, a bag
+or a limb partly hidden behind someone else, and the outline itself still
+shows the person's shape.
+
+- The mask is grown by a margin before use and is never clipped further to the
+  tracker's box.
+- Masks that are empty, tiny, implausibly small for the box, far from the box,
+  over-fragmented or malformed are discarded, and that frame falls back to the
+  padded rectangle. So do interpolated gaps, padded track ends, frames beyond
+  the payload budget and any frame without a mask: a silhouette is never guessed.
+- If a planned region has neither a usable mask nor a valid box, the export
+  fails instead of writing that frame unprotected.
+- The review preview applies the same mask-or-box choice and labels each
+  blurred person `silhouette` or `box` per frame, so thin coverage can be seen
+  and covered with a manual region before export.
+- These checks catch broken masks, not incomplete ones: a well-formed mask can
+  still miss a limb. Evaluations should report silhouette-backed vs. fallback
+  frames and any uncovered person pixels. Rectangle-only behaviour remains
+  available with `--yolo yolo11n.pt` / `SAFEFRAME_YOLO_WEIGHTS=yolo11n.pt`.
+- The segmentation model is a different network from the old detector. On
+  synthetic clips it found slightly fewer person-frames at the frame edge
+  (e.g. 150 vs 160 on one clip, missing a partly visible third person), so
+  minor recall must be re-measured on the labelled evaluation set.
+- Masks are derived personal data. They live only in the job's
+  `analysis.json`, under the same retention and deletion rules, and are never
+  logged.
+
+### 7. Misuse
 
 - The README, the UI notice and the API's `/config` all state the intended
   use and that estimates are probabilistic.

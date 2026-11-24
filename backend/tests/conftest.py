@@ -8,8 +8,11 @@ import subprocess
 from collections.abc import Callable
 from pathlib import Path
 
+import cv2
+import numpy as np
 import pytest
 
+from safeframe.pipeline.masks import Mask, build_coverage
 from safeframe.pipeline.types import Box, FaceDetection, PersonObservation
 
 requires_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
@@ -100,5 +103,28 @@ class SizeAgeEstimator:
         return [(0.9, 8.0) if f.shape[1] < self.child_below_px else (0.05, 35.0) for f in faces]
 
 
-def person(track_id: int, x1: float, y1: float, x2: float, y2: float, conf: float = 0.9):
-    return PersonObservation(track_id, Box(x1, y1, x2, y2), conf)
+def person(
+    track_id: int,
+    x1: float,
+    y1: float,
+    x2: float,
+    y2: float,
+    conf: float = 0.9,
+    mask: Mask | None = None,
+):
+    return PersonObservation(track_id, Box(x1, y1, x2, y2), conf, mask)
+
+
+def ellipse_raw(box: Box, width: int, height: int) -> np.ndarray:
+    """Full-frame binary 'silhouette': an upright ellipse inside ``box``."""
+    raw = np.zeros((height, width), np.uint8)
+    cx, cy = box.center
+    axes = (round(box.width * 0.35), round(box.height * 0.45))
+    cv2.ellipse(raw, (round(cx), round(cy)), axes, 0, 0, 360, 1, -1)
+    return raw
+
+
+def ellipse_mask(box: Box, width: int, height: int) -> Mask:
+    mask = build_coverage(ellipse_raw(box, width, height), box)
+    assert mask is not None
+    return mask
