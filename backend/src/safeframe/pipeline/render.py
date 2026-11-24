@@ -29,14 +29,16 @@ class RenderPlan:
     kept_tracks: list[int] = field(default_factory=list)
     # track -> why: a Decision value, or "override:blur" / "override:keep".
     reasons: dict[int, str] = field(default_factory=dict)
+    # track -> the policy's own decision, before any reviewer override.
+    decisions: dict[int, Decision] = field(default_factory=dict)
 
     @property
     def honoured_bands(self) -> list[int]:
-        """Blurred tracks that were protected because of a band."""
+        """Blurred tracks the policy protects because of their band."""
         return [
             t
             for t in self.blurred_tracks
-            if self.reasons.get(t) in {Decision.WEARER.value, Decision.POSSIBLE.value}
+            if self.decisions.get(t) in {Decision.WEARER, Decision.POSSIBLE}
         ]
 
     def regions_for(self, frame: int) -> list[ProtectedRegion]:
@@ -75,9 +77,9 @@ def plan_render(
     plan = RenderPlan()
     for track in analysis.tracks:
         override = overrides.get(track.track_id)
-        plan.reasons[track.track_id] = (
-            f"override:{override.value}" if override else policy.classify(track).value
-        )
+        decision = policy.classify(track)
+        plan.decisions[track.track_id] = decision
+        plan.reasons[track.track_id] = f"override:{override.value}" if override else decision.value
         if policy.should_blur(track, override):
             plan.blurred_tracks.append(track.track_id)
             for frame in sorted(track.boxes):

@@ -169,6 +169,10 @@ def test_plan_respects_overrides_and_manual_regions(make_video):
     assert plan.reasons[CHILD] == "override:keep"
     assert plan.honoured_bands == []
 
+    # Confirming the blur on a wearer still counts as honouring their band.
+    plan = plan_render(analysis, _policy(analysis), {CHILD: Override.BLUR})
+    assert plan.reasons[CHILD] == "override:blur" and plan.honoured_bands == [CHILD]
+
 
 def test_orphan_bands_are_reported(make_video):
     tracker = ScriptedTracker(_script())
