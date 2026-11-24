@@ -284,6 +284,7 @@ def seal_file(
     published: Path | None = None,
     context: dict | None = None,
     retention_days: float = DEFAULT_RETENTION_DAYS,
+    original_name: str | None = None,
     now: float | None = None,
 ) -> SealHeader:
     """Encrypt ``original`` into ``envelope`` so only the escrow quorum can open it."""
@@ -298,7 +299,7 @@ def seal_file(
         ephemeral_public=_b64(eph_pub),
         created_at=now,
         expires_at=now + retention_days * 86_400,
-        original_name=Path(original).name,
+        original_name=original_name or Path(original).name,
         original_bytes=Path(original).stat().st_size,
         published_sha256=sha256_file(published) if published is not None else None,
         reason=reason,

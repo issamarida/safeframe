@@ -347,7 +347,7 @@ def test_photo_flow(client, settings, tmp_path):
 
 
 def test_sealed_original_is_written_for_honoured_bands(tmp_path, make_video):
-    from safeframe.seal import TrusteeShare, create_escrow, unseal_file
+    from safeframe.seal import TrusteeShare, create_escrow, read_header, unseal_file
 
     public, shares = create_escrow(2, 3)
     key = tmp_path / "escrow.pub.json"
@@ -370,6 +370,7 @@ def test_sealed_original_is_written_for_honoured_bands(tmp_path, make_video):
         assert r.status_code == 200 and r.content.startswith(b"SFSEAL1")
         envelope = tmp_path / "e.sfseal"
         envelope.write_bytes(r.content)
+        assert read_header(envelope).original_name == "holiday.mp4"
         restored = tmp_path / "restored.mp4"
         unseal_file(envelope, [TrusteeShare.from_json(s.to_json()) for s in shares[1:]], restored)
         assert restored.read_bytes() == video.read_bytes()

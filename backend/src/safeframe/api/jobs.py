@@ -441,6 +441,7 @@ class JobManager:
             published=job.output_path,
             context=analysis.context,
             retention_days=self.seal_retention_days,
+            original_name=job.filename,
         )
         job.sealed = True
 

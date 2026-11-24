@@ -353,7 +353,9 @@ def build_parser() -> argparse.ArgumentParser:
 
     p = sub.add_parser("unseal", help="open a sealed original with a quorum of trustee shares")
     p.add_argument("envelope", type=Path)
-    p.add_argument("--share", type=Path, action="append", required=True)
+    p.add_argument(
+        "--share", type=Path, nargs="+", action="extend", required=True, help="trustee share files"
+    )
     p.add_argument("-o", "--output", type=Path, required=True)
     p.add_argument("--allow-expired", action="store_true")
     p.set_defaults(func=cmd_unseal)
