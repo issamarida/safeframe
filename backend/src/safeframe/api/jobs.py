@@ -6,6 +6,10 @@ Data-retention rules (the privacy contract of the app):
   removes that directory entirely.
 * After a successful render, the original upload, the review preview and the
   per-person thumbnails are deleted unless the user opted to keep the upload.
+* The capture location (from the file or the request) is used once, at
+  upload, to resolve the guarded-zone context, and is never stored.
+* A sealed original, when an escrow key is configured, is encrypted to the
+  trustee quorum and lives under the same retention rules as the output.
 * Every job, including kept uploads, is deleted after ``job_ttl_hours`` without
   activity, and jobs orphaned by a crash are deleted on the next start-up.
 """
@@ -25,18 +29,30 @@ from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import cv2
+
 from safeframe.api.schemas import ACTIVE_STATES, JobOut, JobState, RenderRequest, VideoInfoOut
-from safeframe.pipeline.analyze import analyze_video
-from safeframe.pipeline.interfaces import AgeEstimator, Cancelled, FaceDetector, PersonTracker
+from safeframe.pipeline.analyze import Components, analyze_photo, analyze_video, read_photo
+from safeframe.pipeline.context import (
+    CaptureContext,
+    ZoneRegistry,
+    photo_location,
+    resolve_context,
+    video_location,
+)
+from safeframe.pipeline.interfaces import Cancelled
 from safeframe.pipeline.policy import DecisionPolicy
-from safeframe.pipeline.render import plan_render, render_video
+from safeframe.pipeline.render import plan_render, render_photo, render_video
 from safeframe.pipeline.types import Analysis, Box, ManualRegion, VideoInfo
-from safeframe.video.io import VideoError, make_preview, probe
+from safeframe.seal import EscrowPublicKey, seal_file
+from safeframe.video.io import VideoError, VideoWriter, make_preview, probe
 
 log = logging.getLogger(__name__)
 
 JOB_ID = re.compile(r"^[0-9a-f]{32}$")
-ComponentsFactory = Callable[[], tuple[PersonTracker, FaceDetector, AgeEstimator]]
+# photo -> fresh components for one analysis.
+ComponentsFactory = Callable[[bool], Components]
+PHOTO_MAGIC = (b"\xff\xd8\xff", b"\x89PNG\r\n\x1a\n")
 
 # Share of the analysis progress bar spent on the preview encode.
 PREVIEW_SHARE = 0.1
@@ -62,7 +78,14 @@ class Job:
     error: str | None = None
     upload_deleted: bool = False
     video: VideoInfo | None = None
+    media: str = "video"
+    context: dict = field(default_factory=dict)
+    sealed: bool = False
     cancel: threading.Event = field(default_factory=threading.Event, repr=False)
+
+    @property
+    def is_photo(self) -> bool:
+        return self.media == "photo"
 
     # --- file layout ---------------------------------------------------------
     @property
@@ -83,7 +106,15 @@ class Job:
 
     @property
     def output_path(self) -> Path:
-        return self.dir / "output.mp4"
+        return self.dir / ("output.jpg" if self.is_photo else "output.mp4")
+
+    @property
+    def sealed_path(self) -> Path:
+        return self.dir / "original.sfseal"
+
+    @property
+    def output_media_type(self) -> str:
+        return "image/jpeg" if self.is_photo else "video/mp4"
 
     @property
     def meta_path(self) -> Path:
@@ -91,8 +122,12 @@ class Job:
 
     @property
     def download_name(self) -> str:
-        stem = Path(self.filename).stem or "video"
-        return f"{stem}-safeframe.mp4"
+        stem = Path(self.filename).stem or self.media
+        return f"{stem}-safeframe.{'jpg' if self.is_photo else 'mp4'}"
+
+    @property
+    def sealed_download_name(self) -> str:
+        return f"{Path(self.filename).stem or self.media}-original.sfseal"
 
     def touch(self) -> None:
         self.updated_at = time.time()
@@ -110,6 +145,9 @@ class Job:
             "error": self.error,
             "upload_deleted": self.upload_deleted,
             "video": self.video.to_dict() if self.video else None,
+            "media": self.media,
+            "context": self.context,
+            "sealed": self.sealed,
         }
         tmp = self.meta_path.with_suffix(".tmp")
         tmp.write_text(json.dumps(data))
@@ -136,6 +174,9 @@ class Job:
             keep_upload=self.keep_upload,
             upload_deleted=self.upload_deleted,
             output_ready=self.output_path.exists(),
+            media=self.media,
+            context=self.context,
+            sealed_ready=self.sealed and self.sealed_path.exists(),
             created_at=self.created_at,
             updated_at=self.updated_at,
             expires_at=self.updated_at + ttl_seconds,
@@ -158,9 +199,15 @@ class JobManager:
         components: ComponentsFactory,
         ttl_seconds: float = 24 * 3600,
         max_upload_bytes: int = 4 * 1024**3,
+        zones: ZoneRegistry | None = None,
+        escrow: EscrowPublicKey | None = None,
+        seal_retention_days: float = 30.0,
     ) -> None:
         self.jobs_dir = jobs_dir
         self.components = components
+        self.zones = zones
+        self.escrow = escrow
+        self.seal_retention_days = seal_retention_days
         self.ttl_seconds = ttl_seconds
         self.max_upload_bytes = max_upload_bytes
         self._jobs: dict[str, Job] = {}
@@ -185,9 +232,18 @@ class JobManager:
         return job.to_out(self.ttl_seconds)
 
     # --- create --------------------------------------------------------------
-    async def create(self, stream, filename: str, keep_upload: bool) -> Job:
-        """Stream an uploaded video (async iterable of bytes) to disk, validate it
-        with ffprobe and queue analysis. The size limit is enforced while streaming."""
+    async def create(
+        self,
+        stream,
+        filename: str,
+        keep_upload: bool,
+        protect_minors: bool = False,
+        guarded: bool = False,
+        location: tuple[float, float] | None = None,
+    ) -> Job:
+        """Stream an uploaded photo or video (async iterable of bytes) to disk,
+        validate it, resolve its capture context and queue analysis. The size
+        limit is enforced while streaming."""
         import anyio
 
         job_id = secrets.token_hex(16)
@@ -198,8 +254,11 @@ class JobManager:
         )
         try:
             size = 0
+            head = b""
             async with await anyio.open_file(job.upload_path, "wb") as fh:
                 async for chunk in stream:
+                    if len(head) < 16:
+                        head += chunk[:16]
                     size += len(chunk)
                     if size > self.max_upload_bytes:
                         raise JobError(
@@ -208,12 +267,17 @@ class JobManager:
                     await fh.write(chunk)
             if size == 0:
                 raise JobError("empty upload")
-            job.video = await anyio.to_thread.run_sync(probe, job.upload_path)
+            job.media = "photo" if _is_photo(head) else "video"
+            job.video = await anyio.to_thread.run_sync(self._inspect, job)
             if job.video.frame_count <= 0:
                 raise JobError("the video has no frames")
+            if location is None:
+                reader = photo_location if job.is_photo else video_location
+                location = await anyio.to_thread.run_sync(reader, job.upload_path)
+            job.context = resolve_context(location, self.zones, guarded, protect_minors).to_dict()
         except VideoError as exc:
             shutil.rmtree(directory, ignore_errors=True)
-            raise JobError(f"not a readable video: {exc}", 415) from exc
+            raise JobError(f"not a readable photo or video: {exc}", 415) from exc
         except BaseException:
             shutil.rmtree(directory, ignore_errors=True)
             raise
@@ -222,6 +286,13 @@ class JobManager:
             self._jobs[job_id] = job
         self._executor.submit(self._run_analysis, job)
         return job
+
+    @staticmethod
+    def _inspect(job: Job) -> VideoInfo:
+        if job.is_photo:
+            frame = read_photo(job.upload_path)
+            return VideoInfo.photo(frame.shape[1], frame.shape[0])
+        return probe(job.upload_path)
 
     # --- analysis ------------------------------------------------------------
     def _set(self, job: Job, **changes: Any) -> None:
@@ -238,26 +309,34 @@ class JobManager:
         try:
             self._set(job, state=JobState.ANALYZING, stage="Preparing preview", progress=0.0)
             assert job.video is not None
-            make_preview(job.upload_path, job.preview_path, job.video)
+            if job.is_photo:
+                _photo_preview(job.upload_path, job.preview_path)
+            else:
+                make_preview(job.upload_path, job.preview_path, job.video)
 
             self._set(job, stage="Loading models", progress=PREVIEW_SHARE)
-            tracker, faces, ages = self.components()
+            components = self.components(job.is_photo)
 
-            self._set(job, stage="Detecting, tracking and estimating age")
+            self._set(job, stage="Finding people and SafeFrame Bands")
 
             def progress(fraction: float) -> None:
                 job.progress = PREVIEW_SHARE + (1 - PREVIEW_SHARE) * fraction
                 job.touch()
 
-            result = analyze_video(
-                job.upload_path,
-                tracker,
-                faces,
-                ages,
-                progress=progress,
-                cancel=job.cancel,
-                info=job.video,
-            )
+            context = CaptureContext.from_dict(job.context)
+            if job.is_photo:
+                result = analyze_photo(
+                    job.upload_path, components, context, progress=progress, cancel=job.cancel
+                )
+            else:
+                result = analyze_video(
+                    job.upload_path,
+                    components,
+                    context,
+                    progress=progress,
+                    cancel=job.cancel,
+                    info=job.video,
+                )
             job.analysis_path.write_text(json.dumps(result.analysis.to_dict()))
             job.thumbs_dir.mkdir(exist_ok=True)
             for track_id, jpeg in result.thumbnails.items():
@@ -301,10 +380,15 @@ class JobManager:
     def _run_render(self, job: Job, request: RenderRequest) -> None:
         if job.cancel.is_set():
             return
-        tmp = job.dir / "output.partial.mp4"
+        tmp = job.dir / f"output.partial{job.output_path.suffix}"
         try:
             analysis = Analysis.from_dict(json.loads(job.analysis_path.read_text()))
-            policy = DecisionPolicy(request.threshold, request.min_face_samples)
+            policy = DecisionPolicy.for_analysis(
+                analysis,
+                threshold=request.threshold,
+                min_face_samples=request.min_face_samples,
+                min_band_hits=request.min_band_hits,
+            )
             manual = [
                 ManualRegion(r.region_id, r.start_frame, r.end_frame, Box(*r.box))
                 for r in request.manual_regions
@@ -323,8 +407,14 @@ class JobManager:
                 stats["mask"],
                 stats["box"],
             )
-            render_video(job.upload_path, tmp, analysis, plan, progress=progress, cancel=job.cancel)
+            if job.is_photo:
+                render_photo(job.upload_path, tmp, analysis, plan)
+            else:
+                render_video(
+                    job.upload_path, tmp, analysis, plan, progress=progress, cancel=job.cancel
+                )
             tmp.replace(job.output_path)
+            self._seal(job, analysis, plan)
             if not job.keep_upload:
                 self._delete_source_material(job)
             self._set(job, state=JobState.DONE, stage="Ready to download", progress=1.0)
@@ -335,6 +425,25 @@ class JobManager:
             tmp.unlink(missing_ok=True)
             log.exception("render failed for job %s", job.id)
             self._fail(job, f"Rendering failed: {exc}", back_to_review=True)
+
+    def _seal(self, job: Job, analysis: Analysis, plan) -> None:
+        """Seal the original when someone was hidden because of their band."""
+        job.sealed_path.unlink(missing_ok=True)
+        job.sealed = False
+        if self.escrow is None or not plan.honoured_bands:
+            return
+        self._set(job, stage="Sealing the original")
+        seal_file(
+            job.upload_path,
+            job.sealed_path,
+            self.escrow,
+            reason=f"SafeFrame band honoured for person(s) {plan.honoured_bands}",
+            published=job.output_path,
+            context=analysis.context,
+            retention_days=self.seal_retention_days,
+            original_name=job.filename,
+        )
+        job.sealed = True
 
     def _delete_source_material(self, job: Job) -> None:
         """Remove everything that shows unblurred people."""
@@ -402,3 +511,18 @@ class JobManager:
             if job.state in ACTIVE_STATES:
                 job.cancel.set()
         self._executor.shutdown(wait=True, cancel_futures=True)
+
+
+def _is_photo(head: bytes) -> bool:
+    return head.startswith(PHOTO_MAGIC) or (head[:4] == b"RIFF" and head[8:12] == b"WEBP")
+
+
+def _photo_preview(source: Path, output: Path, max_side: int = 1600) -> None:
+    """A one-frame, 1 fps H.264 clip of the (upright) photo for the review player."""
+    frame = read_photo(source)
+    h, w = frame.shape[:2]
+    scale = min(1.0, max_side / max(h, w))
+    pw, ph = max(2, round(w * scale) // 2 * 2), max(2, round(h * scale) // 2 * 2)
+    small = cv2.resize(frame, (pw, ph), interpolation=cv2.INTER_AREA)
+    with VideoWriter(output, VideoInfo.photo(pw, ph), audio_source=None, preset="veryfast") as out:
+        out.write(small)

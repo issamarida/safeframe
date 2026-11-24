@@ -26,7 +26,14 @@ from safeframe.api.schemas import (
     RenderRequest,
 )
 from safeframe.config import Settings, get_settings
-from safeframe.pipeline.policy import DEFAULT_MIN_FACE_SAMPLES, DEFAULT_THRESHOLD
+from safeframe.pipeline.band import SPEC_VERSION, band_sheet_svg
+from safeframe.pipeline.context import ZoneRegistry, parse_location
+from safeframe.pipeline.policy import (
+    DEFAULT_MIN_BAND_HITS,
+    DEFAULT_MIN_FACE_SAMPLES,
+    DEFAULT_THRESHOLD,
+)
+from safeframe.seal import EscrowPublicKey
 
 log = logging.getLogger(__name__)
 
@@ -40,6 +47,7 @@ def default_components(settings: Settings) -> ComponentsFactory:
     bundle = ModelBundle(
         ModelConfig(
             yolo_weights=settings.yolo_weights,
+            pose_weights=settings.pose_weights,
             age_model=settings.age_model,
             age_model_revision=settings.age_model_revision,
             device=settings.device,
@@ -47,7 +55,7 @@ def default_components(settings: Settings) -> ComponentsFactory:
     )
     if settings.warm_up_models:
         threading.Thread(target=bundle.warm_up, name="model-warm-up", daemon=True).start()
-    return lambda: (bundle.new_tracker(), bundle.new_face_detector(), bundle.age_estimator())
+    return bundle.components
 
 
 def create_app(
@@ -63,6 +71,17 @@ def create_app(
             components or default_components(settings),
             ttl_seconds=settings.job_ttl_hours * 3600,
             max_upload_bytes=settings.max_upload_mb * 1024**2,
+            zones=(
+                ZoneRegistry.from_file(settings.zone_registry)
+                if settings.zone_registry
+                else ZoneRegistry.packaged()
+            ),
+            escrow=(
+                EscrowPublicKey.load(settings.escrow_public_key)
+                if settings.escrow_public_key
+                else None
+            ),
+            seal_retention_days=settings.seal_retention_days,
         )
         app.state.jobs = manager
 
@@ -120,6 +139,19 @@ def build_router(settings: Settings) -> APIRouter:
             job_ttl_hours=settings.job_ttl_hours,
             default_threshold=DEFAULT_THRESHOLD,
             default_min_face_samples=DEFAULT_MIN_FACE_SAMPLES,
+            default_min_band_hits=DEFAULT_MIN_BAND_HITS,
+            sealing_enabled=settings.escrow_public_key is not None,
+            seal_retention_days=settings.seal_retention_days,
+            band_spec_version=SPEC_VERSION,
+        )
+
+    @router.get("/band.svg")
+    def band_sheet() -> Response:
+        """A printable A4 sheet of SafeFrame Bands (print at 100 %)."""
+        return Response(
+            band_sheet_svg(),
+            media_type="image/svg+xml",
+            headers={"Content-Disposition": 'inline; filename="safeframe-band.svg"'},
         )
 
     @router.post("/jobs", response_model=JobOut, status_code=201)
@@ -127,15 +159,27 @@ def build_router(settings: Settings) -> APIRouter:
         request: Request,
         filename: str = Query("video.mp4", max_length=255),
         keep_upload: bool = Query(False),
+        protect_minors: bool = Query(False, description="Event mode: also blur likely minors"),
+        guarded: bool = Query(False, description="Captured in a bank, court or similar place"),
+        location: str | None = Query(
+            None, max_length=64, description="'lat,lon' if the file has no location metadata"
+        ),
         jobs: JobManager = Depends(manager),
     ) -> JobOut:
-        """Upload a video as the raw request body (``application/octet-stream``).
+        """Upload a photo (JPEG, PNG, WebP) or video as the raw request body.
 
         Streaming the body straight to the job directory avoids multipart
         temp files in shared system directories and enforces the size limit
-        without buffering.
+        without buffering. ``guarded`` can only add restrictions; a location
+        inside a registered guarded zone cannot be overridden.
         """
-        job = await jobs.create(request.stream(), filename, keep_upload)
+        try:
+            loc = parse_location(location) if location else None
+        except ValueError as exc:
+            raise HTTPException(422, str(exc)) from exc
+        job = await jobs.create(
+            request.stream(), filename, keep_upload, protect_minors, guarded, loc
+        )
         return jobs.out(job)
 
     @router.get("/jobs/{job_id}", response_model=JobOut)
@@ -204,7 +248,22 @@ def build_router(settings: Settings) -> APIRouter:
         if job.state is not JobState.DONE:
             raise HTTPException(409, "the video has not been rendered yet")
         job.touch()
-        return _file(job.output_path, "video/mp4", "output not found", download=job.download_name)
+        return _file(
+            job.output_path, job.output_media_type, "output not found", download=job.download_name
+        )
+
+    @router.get("/jobs/{job_id}/sealed")
+    def download_sealed(job: Job = Depends(job_dep)) -> FileResponse:
+        """The sealed original: openable only by a quorum of escrow trustees."""
+        if job.state is not JobState.DONE or not job.sealed:
+            raise HTTPException(404, "no sealed original for this job")
+        job.touch()
+        return _file(
+            job.sealed_path,
+            "application/octet-stream",
+            "sealed original not found",
+            download=job.sealed_download_name,
+        )
 
     @router.delete("/jobs/{job_id}", status_code=204)
     def delete_job(job: Job = Depends(job_dep), jobs: JobManager = Depends(manager)) -> Response:

@@ -11,8 +11,12 @@ const config: AppConfig = {
   job_ttl_hours: 24,
   default_threshold: 0.35,
   default_min_face_samples: 3,
-  notice: "Age estimation is probabilistic.",
-  intended_use: "SafeFrame is intended to protect children's privacy in video you share.",
+  default_min_band_hits: 1,
+  sealing_enabled: false,
+  seal_retention_days: 30,
+  band_spec_version: 1,
+  notice: "SafeFrame blurs everyone wearing a SafeFrame Band.",
+  intended_use: "The band is a privacy request, not a disguise.",
 };
 
 describe("UploadScreen", () => {
@@ -32,16 +36,55 @@ describe("UploadScreen", () => {
 
   it("explains retention for both choices", async () => {
     render(<UploadScreen config={config} onUploaded={vi.fn()} />);
-    expect(screen.getByText(/deleted as soon as the blurred video is ready/i)).toBeInTheDocument();
-    await userEvent.click(screen.getByRole("checkbox"));
+    expect(screen.getByText(/deleted as soon as the blurred file is ready/i)).toBeInTheDocument();
+    await userEvent.click(screen.getByRole("checkbox", { name: /keep my original/i }));
     expect(screen.getByText(/after 24 h of inactivity/i)).toBeInTheDocument();
+  });
+
+  it("accepts photos and links to a printable band", () => {
+    render(<UploadScreen config={config} onUploaded={vi.fn()} />);
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(input.accept).toContain("image/jpeg");
+    expect(screen.getByRole("link", { name: /print a band/i })).toHaveAttribute("href", "/api/band.svg");
+  });
+
+  it("sends the guarded and event-mode choices with the upload", async () => {
+    const sent: string[] = [];
+    class FakeXHR {
+      upload = {};
+      status = 201;
+      responseText = "{}";
+      onload: (() => void) | null = null;
+      open(_: string, url: string) {
+        sent.push(url);
+      }
+      setRequestHeader() {}
+      send() {
+        this.onload?.();
+      }
+      abort() {}
+    }
+    vi.stubGlobal("XMLHttpRequest", FakeXHR);
+    const onUploaded = vi.fn();
+    render(<UploadScreen config={config} onUploaded={onUploaded} />);
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    await userEvent.upload(input, new File(["x"], "bank.jpg", { type: "image/jpeg" }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /guarded place/i }));
+    await userEvent.click(screen.getByRole("checkbox", { name: /event mode/i }));
+    await userEvent.click(screen.getByRole("button", { name: /upload and analyse/i }));
+    expect(onUploaded).toHaveBeenCalled();
+    const params = new URL(sent[0]!, "http://x").searchParams;
+    expect(params.get("guarded")).toBe("true");
+    expect(params.get("protect_minors")).toBe("true");
+    expect(params.get("filename")).toBe("bank.jpg");
+    vi.unstubAllGlobals();
   });
 });
 
 describe("Notice", () => {
-  it("always states that age estimation is probabilistic", async () => {
+  it("always states that only a visible band can be honoured", async () => {
     render(<Notice config={config} />);
-    expect(screen.getByRole("note")).toHaveTextContent(/age estimation is probabilistic/i);
+    expect(screen.getByRole("note")).toHaveTextContent(/only honour a band it can see/i);
     await userEvent.click(screen.getByRole("button", { name: /more/i }));
     expect(screen.getByText(config.intended_use)).toBeInTheDocument();
   });

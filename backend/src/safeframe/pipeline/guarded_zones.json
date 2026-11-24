@@ -1,0 +1,11 @@
+{
+  "version": 1,
+  "note": "Illustrative sample only, with approximate coordinates. Partner devices use a signed registry built from public map data (amenity=bank|atm|courthouse|police, aeroway=aerodrome, ...) plus venue self-registration. See docs/PROTOCOL.md.",
+  "zones": [
+    { "id": "es-bde-cibeles", "name": "Banco de España (Madrid)", "kind": "bank", "lat": 40.4183, "lon": -3.6944, "radius_m": 90 },
+    { "id": "es-ts-madrid", "name": "Tribunal Supremo (Madrid)", "kind": "court", "lat": 40.4237, "lon": -3.6950, "radius_m": 60 },
+    { "id": "es-mad-airport", "name": "Adolfo Suárez Madrid-Barajas Airport", "kind": "airport", "lat": 40.4936, "lon": -3.5668, "radius_m": 2500 },
+    { "id": "gb-boe-london", "name": "Bank of England (London)", "kind": "bank", "lat": 51.5142, "lon": -0.0885, "radius_m": 90 },
+    { "id": "us-frbny", "name": "Federal Reserve Bank of New York", "kind": "bank", "lat": 40.7083, "lon": -74.0087, "radius_m": 70 }
+  ]
+}

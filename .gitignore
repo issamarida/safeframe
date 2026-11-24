@@ -266,6 +266,10 @@ weights/
 *.h5
 *.pb
 
+# Sealed originals and trustee key shares (escrow.pub.json is public and fine)
+*.sfseal
+trustee-*.json
+
 # Secrets
 .env.*
 !.env.example

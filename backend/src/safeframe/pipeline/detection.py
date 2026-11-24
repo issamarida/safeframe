@@ -38,17 +38,28 @@ def _np(t) -> np.ndarray:
     return np.asarray(t)
 
 
-def observations_from_result(result, frame_shape: tuple[int, ...]) -> list[PersonObservation]:
-    """Convert one tracked Ultralytics result into observations with masks.
+def observations_from_result(
+    result, frame_shape: tuple[int, ...], untracked: bool = False
+) -> list[PersonObservation]:
+    """Convert one Ultralytics result into observations with masks.
 
     Every tracked box becomes an observation even when its mask is missing or
-    cannot be used: the box is then the fallback coverage.
+    cannot be used: the box is then the fallback coverage. With ``untracked``
+    (a single photo, no tracker) people are numbered 1, 2, ... left to right.
     """
     boxes = result.boxes
-    if boxes is None or boxes.id is None:
+    if boxes is None or (boxes.id is None and not untracked):
         return []
     xyxy = _np(boxes.xyxy)
-    ids = [int(i) for i in _np(boxes.id).astype(int).tolist()]
+    if len(xyxy) == 0:
+        return []
+    if untracked:
+        order = sorted(range(len(xyxy)), key=lambda i: float(xyxy[i][0]))
+        ids = [0] * len(xyxy)
+        for rank, i in enumerate(order, start=1):
+            ids[i] = rank
+    else:
+        ids = [int(i) for i in _np(boxes.id).astype(int).tolist()]
     confs = [float(c) for c in _np(boxes.conf).tolist()]
     masks = None
     raw_masks = getattr(result, "masks", None)
@@ -95,6 +106,7 @@ class YoloPersonTracker:
         conf: float = 0.1,
         iou: float = 0.6,
         imgsz: int = 960,
+        tracking: bool = True,
     ) -> None:
         from ultralytics import YOLO
 
@@ -103,9 +115,8 @@ class YoloPersonTracker:
             # Bare model name: keep the download out of the working directory.
             path = yolo_weights_path(weights)
         self._model = YOLO(str(path))
+        self.tracking = tracking
         self._kwargs = dict(
-            persist=True,
-            tracker=str(tracker_config()),
             classes=[PERSON_CLASS],
             conf=conf,
             iou=iou,
@@ -114,11 +125,19 @@ class YoloPersonTracker:
             # Masks at decoded source resolution, letterbox undone by Ultralytics.
             retina_masks=True,
         )
+        if tracking:
+            self._kwargs.update(persist=True, tracker=str(tracker_config()))
+        else:
+            # A photo has no second association stage to rescue weak boxes.
+            self._kwargs["conf"] = max(conf, 0.25)
         if device:
             self._kwargs["device"] = device
         self._checked_feats = False
 
     def update(self, frame: np.ndarray) -> list[PersonObservation]:
+        if not self.tracking:
+            result = self._model.predict(frame, **self._kwargs)[0]
+            return observations_from_result(result, frame.shape, untracked=True)
         result = self._model.track(frame, **self._kwargs)[0]
         if result.masks is not None and not self._checked_feats:
             self._checked_feats = True

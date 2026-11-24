@@ -1,14 +1,16 @@
 import pytest
 
 from safeframe.pipeline.policy import (
+    Decision,
     DecisionPolicy,
     Override,
     aggregate,
     bucket_stats,
     minor_fraction,
+    needs_age,
     parse_age_bucket,
 )
-from safeframe.pipeline.types import AgeSample, Box, Track, TrackStatus
+from safeframe.pipeline.types import AgeSample, AgeStatus, BandHit, BandVia, Box, Track
 
 
 @pytest.mark.parametrize(
@@ -62,29 +64,104 @@ def test_aggregate_is_weighted_mean():
     assert aggregate([]) == (None, None)
 
 
-def test_too_few_samples_is_uncertain_and_blurred():
+def test_too_few_samples_is_uncertain():
     policy = DecisionPolicy(threshold=0.35, min_face_samples=3)
     track = _track([_s(0.0), _s(0.0)])  # two confident "adult" samples are not enough
-    assert policy.classify(track) is TrackStatus.UNCERTAIN
-    assert policy.should_blur(track)
+    assert policy.age_status(track) is AgeStatus.UNCERTAIN
 
 
 def test_threshold_splits_minor_and_adult():
     policy = DecisionPolicy(threshold=0.35, min_face_samples=2)
-    assert policy.classify(_track([_s(0.4), _s(0.4)])) is TrackStatus.MINOR
-    assert policy.classify(_track([_s(0.1), _s(0.1)])) is TrackStatus.ADULT
-    assert not policy.should_blur(_track([_s(0.1), _s(0.1)]))
+    assert policy.age_status(_track([_s(0.4), _s(0.4)])) is AgeStatus.MINOR
+    assert policy.age_status(_track([_s(0.1), _s(0.1)])) is AgeStatus.ADULT
+
+
+def _band(track, clean=1, ambiguous=0):
+    for i in range(clean):
+        track.add_band_hit(BandHit(i, BandVia.WRIST, False, 12.0))
+    for i in range(ambiguous):
+        track.add_band_hit(BandHit(100 + i, BandVia.BOX, True, 12.0))
+    return track
+
+
+CHILD = [_s(0.9)] * 3
+ADULT = [_s(0.05)] * 3
+NO_FACE: list = []
+
+
+@pytest.mark.parametrize(
+    ("band", "age", "guarded", "event", "expected"),
+    [
+        # Standard capture: the band alone decides, age is irrelevant.
+        ("clean", ADULT, False, False, Decision.WEARER),
+        ("clean", NO_FACE, False, False, Decision.WEARER),
+        ("ambiguous", ADULT, False, False, Decision.POSSIBLE),
+        (None, CHILD, False, False, Decision.VISIBLE),
+        (None, NO_FACE, False, False, Decision.VISIBLE),
+        # Guarded zone: only positive evidence of a child keeps the protection.
+        ("clean", CHILD, True, False, Decision.WEARER),
+        ("ambiguous", CHILD, True, False, Decision.POSSIBLE),
+        ("clean", ADULT, True, False, Decision.NOT_HONOURED),
+        ("clean", NO_FACE, True, False, Decision.NOT_HONOURED),  # masked robber
+        (None, CHILD, True, False, Decision.VISIBLE),
+        # Event mode: likely minors and uncertain people too, fail closed...
+        (None, CHILD, False, True, Decision.MINOR),
+        (None, NO_FACE, False, True, Decision.UNCERTAIN),
+        (None, ADULT, False, True, Decision.VISIBLE),
+        ("clean", ADULT, False, True, Decision.WEARER),
+        # ...except in guarded zones, where "uncertain" protects nobody.
+        (None, NO_FACE, True, True, Decision.VISIBLE),
+        (None, CHILD, True, True, Decision.MINOR),
+        ("clean", ADULT, True, True, Decision.NOT_HONOURED),
+    ],
+)
+def test_decision_matrix(band, age, guarded, event, expected):
+    track = _track(list(age))
+    if band == "clean":
+        _band(track)
+    elif band == "ambiguous":
+        _band(track, clean=0, ambiguous=1)
+    policy = DecisionPolicy(guarded=guarded, protect_minors=event)
+    assert policy.classify(track) is expected
+    assert policy.should_blur(track) is (
+        expected in {Decision.WEARER, Decision.POSSIBLE, Decision.MINOR, Decision.UNCERTAIN}
+    )
+
+
+def test_too_few_clean_sightings_is_still_protected():
+    track = _band(_track([]), clean=1)
+    assert DecisionPolicy(min_band_hits=2).classify(track) is Decision.POSSIBLE
+    assert DecisionPolicy(min_band_hits=2).should_blur(track)
 
 
 def test_overrides_win():
-    policy = DecisionPolicy(min_face_samples=1)
-    adult = _track([_s(0.0)])
-    minor = _track([_s(1.0)])
-    assert policy.should_blur(adult, Override.BLUR)
-    assert not policy.should_blur(minor, Override.KEEP)
+    policy = DecisionPolicy()
+    wearer = _band(_track([]))
+    bystander = _track([])
+    assert policy.should_blur(bystander, Override.BLUR)
+    assert not policy.should_blur(wearer, Override.KEEP)
 
 
-@pytest.mark.parametrize("bad", [-0.1, 1.5])
-def test_policy_validates_threshold(bad):
+def test_age_is_only_needed_where_it_can_change_a_decision():
+    wearer, bystander = _band(_track([])), _track([])
+    assert not needs_age(wearer, guarded=False, protect_minors=False)
+    assert not needs_age(bystander, guarded=True, protect_minors=False)
+    assert needs_age(wearer, guarded=True, protect_minors=False)
+    assert needs_age(bystander, guarded=False, protect_minors=True)
+
+
+def test_band_hit_storage_is_capped_but_counted():
+    from safeframe.pipeline.types import MAX_BAND_HITS_STORED
+
+    track = _band(_track([]), clean=MAX_BAND_HITS_STORED + 50)
+    assert len(track.band_hits) == MAX_BAND_HITS_STORED
+    assert track.band_confirmed == MAX_BAND_HITS_STORED + 50
+    restored = Track.from_dict(track.to_dict())
+    assert restored.band_confirmed == track.band_confirmed
+    assert restored.band_hits == track.band_hits
+
+
+@pytest.mark.parametrize("bad", [{"threshold": -0.1}, {"threshold": 1.5}, {"min_band_hits": 0}])
+def test_policy_validates_parameters(bad):
     with pytest.raises(ValueError):
-        DecisionPolicy(threshold=bad)
+        DecisionPolicy(**bad)

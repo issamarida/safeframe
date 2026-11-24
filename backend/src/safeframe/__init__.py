@@ -1,8 +1,9 @@
-"""SafeFrame: blur people estimated to be under 18 in video.
+"""SafeFrame: blur everyone wearing a SafeFrame Band before a photo or video is shared.
 
-Age estimation is probabilistic. SafeFrame is designed to fail closed: anyone
-it cannot confidently classify as an adult is blurred, and every result goes
-through a human review step before export.
+The band is a privacy request, not a disguise. Security cameras never honour
+it, guarded places (banks, courts, ...) honour it only for children, and the
+unblurred original can be sealed so that only a quorum of independent
+trustees can ever open it.
 """
 
-__version__ = "0.1.0"
+__version__ = "0.2.0"

@@ -1,5 +1,10 @@
 """Shared fixtures. All test video is synthesised by FFmpeg at runtime —
-no footage is ever stored in the repository."""
+no footage is ever stored in the repository.
+
+Every synthetic frame carries its own index as 12 black/white 8x8 blocks
+along the top edge, so scripted fakes know which frame they are looking at
+even when the pipeline decodes a video twice (pass 2 never calls the tracker).
+"""
 
 from __future__ import annotations
 
@@ -12,10 +17,25 @@ import cv2
 import numpy as np
 import pytest
 
+from safeframe.pipeline.analyze import Components
+from safeframe.pipeline.band import BandDetection
 from safeframe.pipeline.masks import Mask, build_coverage
 from safeframe.pipeline.types import Box, FaceDetection, PersonObservation
+from safeframe.pipeline.wearers import PoseObservation, Wrist
 
 requires_ffmpeg = pytest.mark.skipif(shutil.which("ffmpeg") is None, reason="ffmpeg not installed")
+
+INDEX_BITS = 12
+_STAMP = f"lt(Y,8)*lt(X,{8 * INDEX_BITS})"
+STAMP_FILTER = (
+    f"geq=lum='if({_STAMP},255*mod(floor(N/pow(2,floor(X/8))),2),lum(X,Y))'"
+    f":cb='if({_STAMP},128,cb(X,Y))':cr='if({_STAMP},128,cr(X,Y))'"
+)
+
+
+def frame_index(frame: np.ndarray) -> int:
+    """Decode the index stamped into a synthetic frame by ``make_video``."""
+    return sum(int(frame[4, 8 * b + 4].mean() > 128) << b for b in range(INDEX_BITS))
 
 
 @pytest.fixture
@@ -52,7 +72,17 @@ def make_video(tmp_path: Path) -> Callable[..., Path]:
             ]
         for key, value in (metadata or {}).items():
             cmd += ["-metadata", f"{key}={value}"]
-        cmd += ["-c:v", "libx264", "-pix_fmt", "yuv420p", "-preset", "ultrafast", str(out)]
+        cmd += [
+            "-vf",
+            STAMP_FILTER,
+            "-c:v",
+            "libx264",
+            "-pix_fmt",
+            "yuv420p",
+            "-preset",
+            "ultrafast",
+            str(out),
+        ]
         subprocess.run(cmd, check=True)
         return out
 
@@ -73,15 +103,17 @@ class ScriptedTracker:
 
 
 class HeadFaceDetector:
-    """Reports a face at the top-centre of each person the tracker just returned."""
+    """Reports a face at the top-centre of each scripted person in this frame."""
 
     def __init__(self, tracker: ScriptedTracker, face_sizes: dict[int, float]) -> None:
         self.tracker = tracker
         self.face_sizes = face_sizes
+        self.calls = 0
 
     def detect(self, frame) -> list[FaceDetection]:
+        self.calls += 1
         faces = []
-        for person in self.tracker.script.get(self.tracker.frame - 1, []):
+        for person in self.tracker.script.get(frame_index(frame), []):
             size = self.face_sizes.get(person.track_id)
             if size is None:
                 continue  # this person never shows their face
@@ -97,10 +129,55 @@ class SizeAgeEstimator:
     def __init__(self, child_below_px: int) -> None:
         self.child_below_px = child_below_px
         self.calls = 0
+        self.crops = 0
 
     def estimate(self, faces):
         self.calls += 1
+        self.crops += len(faces)
         return [(0.9, 8.0) if f.shape[1] < self.child_below_px else (0.05, 35.0) for f in faces]
+
+
+def marker_at(x: float, y: float, side: float = 12.0, marker_id: int = 7) -> BandDetection:
+    h = side / 2
+    return BandDetection(
+        marker_id, ((x - h, y - h), (x + h, y - h), (x + h, y + h), (x - h, y + h))
+    )
+
+
+class ScriptedBands:
+    """Reports band markers at scripted centres: {frame: [(x, y), ...]}."""
+
+    def __init__(self, script: dict[int, list[tuple[float, float]]]) -> None:
+        self.script = script
+        self.rois_seen: list = []
+
+    def detect(self, frame, rois=()):
+        self.rois_seen.extend(rois)
+        return [marker_at(x, y) for x, y in self.script.get(frame_index(frame), [])]
+
+
+class ScriptedWrists:
+    """Pose model fake: {frame: [PoseObservation, ...]}."""
+
+    def __init__(self, script: dict[int, list[PoseObservation]]) -> None:
+        self.script = script
+
+    def locate(self, frame):
+        return self.script.get(frame_index(frame), [])
+
+
+def pose(box: tuple[float, float, float, float], *wrists: tuple[float, float]) -> PoseObservation:
+    return PoseObservation(Box(*box), tuple(Wrist(x, y, 0.9) for x, y in wrists))
+
+
+def components(tracker, faces, ages, bands=None, wrists=None) -> Components:
+    return Components(
+        tracker=tracker,
+        band_detector=bands or ScriptedBands({}),
+        face_detector=faces,
+        age_estimator=ages,
+        wrist_locator=wrists,
+    )
 
 
 def person(

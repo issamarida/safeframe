@@ -93,10 +93,45 @@ class AgeSample:
     weight: float
 
 
-class TrackStatus(StrEnum):
+class AgeStatus(StrEnum):
     MINOR = "minor"  # enough evidence, probability of being under 18 >= threshold
     ADULT = "adult"  # enough evidence, probability below threshold
-    UNCERTAIN = "uncertain"  # not enough face evidence: blurred by default (fail closed)
+    UNCERTAIN = "uncertain"  # not enough face evidence
+
+
+class BandVia(StrEnum):
+    """How a band sighting was attributed to a person, strongest first."""
+
+    WRIST = "wrist"  # the band is at one of this person's wrist keypoints
+    BODY = "body"  # the band is inside this person's silhouette
+    BOX = "box"  # the band is inside this person's box
+
+
+@dataclass(frozen=True, slots=True)
+class BandHit:
+    """One frame in which a band was attributed to a track.
+
+    ``ambiguous`` means the sighting fitted several people equally well; each
+    of them gets an ambiguous hit and is protected unless a reviewer decides
+    otherwise.
+    """
+
+    frame: int
+    via: BandVia
+    ambiguous: bool
+    side_px: float
+
+    def to_row(self) -> list:
+        return [self.frame, self.via.value, int(self.ambiguous), round(self.side_px, 1)]
+
+    @classmethod
+    def from_row(cls, row: list) -> BandHit:
+        frame, via, ambiguous, side = row
+        return cls(int(frame), BandVia(via), bool(ambiguous), float(side))
+
+
+# Hits kept per track in the analysis (the first ones, plus counts of all).
+MAX_BAND_HITS_STORED = 200
 
 
 @dataclass(slots=True)
@@ -114,6 +149,22 @@ class Track:
     p_minor: float | None = None
     expected_age: float | None = None
     peak_confidence: float = 0.0
+    band_hits: list[BandHit] = field(default_factory=list)
+    # Totals over every hit, including any beyond MAX_BAND_HITS_STORED.
+    band_confirmed: int = 0
+    band_possible: int = 0
+
+    def add_band_hit(self, hit: BandHit) -> None:
+        if hit.ambiguous:
+            self.band_possible += 1
+        else:
+            self.band_confirmed += 1
+        if len(self.band_hits) < MAX_BAND_HITS_STORED:
+            self.band_hits.append(hit)
+
+    @property
+    def wears_band(self) -> bool:
+        return self.band_confirmed > 0 or self.band_possible > 0
 
     @property
     def first_frame(self) -> int:
@@ -144,6 +195,16 @@ class Track:
                 for f in sorted(self.boxes)
             ],
             "samples": [asdict(s) for s in self.samples],
+            "band": {
+                "confirmed": self.band_confirmed,
+                "possible": self.band_possible,
+                "first_frame": min((h.frame for h in self.band_hits), default=None),
+                "via": {
+                    v.value: sum(1 for h in self.band_hits if h.via is v and not h.ambiguous)
+                    for v in BandVia
+                },
+                "hits": [h.to_row() for h in self.band_hits],
+            },
         }
         masks = [
             self.masks[f].to_row(f)
@@ -177,6 +238,10 @@ class Track:
         track.p_minor = data.get("p_minor")
         track.expected_age = data.get("expected_age")
         track.peak_confidence = data.get("peak_confidence", 0.0)
+        band = data.get("band") or {}
+        track.band_hits = [BandHit.from_row(r) for r in band.get("hits", [])]
+        track.band_confirmed = int(band.get("confirmed", 0))
+        track.band_possible = int(band.get("possible", 0))
         return track
 
 
@@ -191,6 +256,12 @@ class VideoInfo:
     duration: float
     has_audio: bool
     audio_codec: str | None = None
+    # "video", or "photo" for a single still image (one frame at 1 fps).
+    media: str = "video"
+
+    @property
+    def is_photo(self) -> bool:
+        return self.media == "photo"
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -198,6 +269,10 @@ class VideoInfo:
     @classmethod
     def from_dict(cls, data: dict) -> VideoInfo:
         return cls(**data)
+
+    @classmethod
+    def photo(cls, width: int, height: int) -> VideoInfo:
+        return cls(width, height, 1.0, "1/1", 1, 0.0, False, None, "photo")
 
 
 @dataclass(slots=True)
@@ -237,11 +312,17 @@ class Analysis:
     video: VideoInfo
     tracks: list[Track]
     settings: dict
+    # CaptureContext.to_dict(): where the media was captured and which rules apply.
+    context: dict = field(default_factory=dict)
+    # Frames where a band was seen but could not be matched to any person.
+    orphan_band_frames: list[int] = field(default_factory=list)
 
     def to_dict(self) -> dict:
         return {
             "video": self.video.to_dict(),
             "settings": self.settings,
+            "context": self.context,
+            "orphan_band_frames": self.orphan_band_frames,
             "tracks": [t.to_dict() for t in self.tracks],
         }
 
@@ -255,6 +336,8 @@ class Analysis:
                 Track.from_dict(t, (video.width, video.height), budget) for t in data["tracks"]
             ],
             settings=data.get("settings", {}),
+            context=data.get("context", {}),
+            orphan_band_frames=[int(f) for f in data.get("orphan_band_frames", [])],
         )
 
     @property

@@ -10,6 +10,7 @@ from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from safeframe.pipeline.age import DEFAULT_AGE_MODEL
 from safeframe.pipeline.detection import DEFAULT_YOLO_WEIGHTS
+from safeframe.pipeline.wearers import DEFAULT_POSE_WEIGHTS
 
 
 class Settings(BaseSettings):
@@ -22,10 +23,19 @@ class Settings(BaseSettings):
     sweep_interval_seconds: int = Field(60, ge=5)
 
     yolo_weights: str = DEFAULT_YOLO_WEIGHTS
+    # Wrist keypoints for band attribution; empty disables the pose model.
+    pose_weights: str = DEFAULT_POSE_WEIGHTS
     age_model: str = DEFAULT_AGE_MODEL
     age_model_revision: str | None = None
     device: str | None = None
     warm_up_models: bool = True
+
+    # Guarded-zone registry JSON; the packaged sample is used when unset.
+    zone_registry: Path | None = None
+    # Escrow public key (from `safeframe trustees init`). When set, the original
+    # of every photo or video in which a band was honoured is sealed to it.
+    escrow_public_key: Path | None = None
+    seal_retention_days: float = Field(30.0, gt=0)
 
     cors_origins: list[str] = ["http://localhost:5173", "http://127.0.0.1:5173"]
     # Built React app; served at / when present.
