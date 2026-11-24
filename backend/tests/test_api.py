@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import time
 
 import pytest
@@ -13,8 +14,10 @@ from safeframe.video.io import probe
 
 from .conftest import (
     HeadFaceDetector,
+    ScriptedBands,
     ScriptedTracker,
     SizeAgeEstimator,
+    components,
     ellipse_mask,
     person,
     requires_ffmpeg,
@@ -22,8 +25,14 @@ from .conftest import (
 
 pytestmark = requires_ffmpeg
 
+# Person 1 wears a band, seen once at frame 6 at their wrist.
+BAND = {6: [(30.0, 130.0)]}
+# A band on person 2 (the "adult"), for guarded-zone tests.
+ADULT_BAND = {6: [(240.0, 120.0)]}
+_band_script = {"script": BAND}
 
-def _components():
+
+def _components(photo: bool = False):
     from safeframe.pipeline.types import Box
 
     child_mask = ellipse_mask(Box(20, 40, 100, 220), 320, 240)
@@ -35,8 +44,25 @@ def _components():
         ]
         for f in range(50)
     }
+    if photo:
+        script = {0: script[0]}
+        bands = {0: next(iter(_band_script["script"].values()))}
+    else:
+        bands = _band_script["script"]
     tracker = ScriptedTracker(script)
-    return tracker, HeadFaceDetector(tracker, {1: 34, 2: 50}), SizeAgeEstimator(60)
+    return components(
+        tracker,
+        HeadFaceDetector(tracker, {1: 34, 2: 50}),
+        SizeAgeEstimator(60),
+        ScriptedBands(bands),
+    )
+
+
+@pytest.fixture(autouse=True)
+def _reset_band_script():
+    _band_script["script"] = BAND
+    yield
+    _band_script["script"] = BAND
 
 
 @pytest.fixture
@@ -79,9 +105,16 @@ def _upload(client, video, keep=False, filename="holiday.mp4"):
 
 def test_config_exposes_notice_and_intended_use(client):
     body = client.get("/api/config").json()
-    assert "probabilistic" in body["notice"]
-    assert "children's privacy" in body["intended_use"]
+    assert "SafeFrame Band" in body["notice"]
+    assert "not a disguise" in body["intended_use"]
     assert 0 < body["default_threshold"] < 0.5
+    assert body["sealing_enabled"] is False and body["band_spec_version"] == 1
+
+
+def test_printable_band_sheet(client):
+    r = client.get("/api/band.svg")
+    assert r.status_code == 200 and r.headers["content-type"].startswith("image/svg+xml")
+    assert b"SafeFrame Band" in r.content
 
 
 def test_full_flow_deletes_upload_after_render(client, make_video, settings):
@@ -95,8 +128,13 @@ def test_full_flow_deletes_upload_after_render(client, make_video, settings):
 
     analysis = client.get(f"/api/jobs/{jid}/analysis").json()
     assert [t["track_id"] for t in analysis["tracks"]] == [1, 2]
-    assert analysis["tracks"][0]["p_minor"] > 0.5
-    assert "samples" not in analysis["tracks"][0]
+    wearer, other = analysis["tracks"]
+    assert wearer["band"]["confirmed"] == 1 and wearer["band"]["first_frame"] == 6
+    assert other["band"]["confirmed"] == other["band"]["possible"] == 0
+    # Nobody's age is estimated outside guarded zones and event mode.
+    assert wearer["p_minor"] is None and wearer["face_samples"] == 0
+    assert "samples" not in wearer
+    assert analysis["context"]["guarded"] is False
 
     preview = client.get(f"/api/jobs/{jid}/preview", headers={"Range": "bytes=0-99"})
     assert preview.status_code == 206 and len(preview.content) == 100
@@ -116,7 +154,7 @@ def test_full_flow_deletes_upload_after_render(client, make_video, settings):
     )
     assert r.status_code == 202, r.text
     job = _wait(client, jid, "done")
-    assert job["output_ready"] and job["upload_deleted"]
+    assert job["output_ready"] and job["upload_deleted"] and not job["sealed_ready"]
 
     # Everything showing unblurred people is gone.
     assert sorted(p.name for p in job_dir.iterdir()) == ["analysis.json", "job.json", "output.mp4"]
@@ -252,3 +290,93 @@ def test_analysis_serves_validated_masks_gzipped(client, make_video, settings):
     r = client.post(f"/api/jobs/{jid}/render", json={})
     assert r.status_code == 202
     _wait(client, jid, "done")
+
+
+def test_guarded_zone_from_location_is_locked_in(client, make_video):
+    _band_script["script"] = ADULT_BAND
+    r = client.post(
+        "/api/jobs",
+        params={"filename": "bank.mp4", "location": "40.4183,-3.6944", "guarded": False},
+        content=make_video().read_bytes(),
+    )
+    assert r.status_code == 201, r.text
+    job = _wait(client, r.json()["id"], "review")
+    assert job["context"]["guarded"] and job["context"]["zone_kind"] == "bank"
+    assert "40.41" not in json.dumps(job)  # the location itself is never stored
+    analysis = client.get(f"/api/jobs/{job['id']}/analysis").json()
+    adult = next(t for t in analysis["tracks"] if t["track_id"] == 2)
+    child = next(t for t in analysis["tracks"] if t["track_id"] == 1)
+    assert adult["band"]["confirmed"] == 1 and adult["face_samples"] > 0
+    assert adult["p_minor"] < 0.2  # an adult: the band is not honoured here
+    assert child["face_samples"] == 0  # no band, so their face was never analysed
+
+
+def test_declared_guarded_and_bad_location(client, make_video):
+    video = make_video().read_bytes()
+    r = client.post("/api/jobs", params={"guarded": True}, content=video)
+    assert r.json()["context"]["guarded_source"] == "user"
+    assert client.post("/api/jobs", params={"location": "north"}, content=video).status_code == 422
+
+
+def _jpeg(path):
+    import cv2
+    import numpy as np
+
+    img = np.random.default_rng(2).integers(0, 255, (240, 320, 3), dtype=np.uint8)
+    img[:8] = 0
+    cv2.imwrite(str(path), img)
+    return path
+
+
+def test_photo_flow(client, settings, tmp_path):
+    job = _upload(client, _jpeg(tmp_path / "IMG_0001.jpg"), filename="IMG_0001.jpg")
+    assert job["media"] == "photo" and job["video"]["frame_count"] == 1
+    job = _wait(client, job["id"], "review")
+    jid = job["id"]
+    preview = client.get(f"/api/jobs/{jid}/preview")
+    assert preview.status_code == 200
+    analysis = client.get(f"/api/jobs/{jid}/analysis").json()
+    assert analysis["video"]["media"] == "photo"
+    assert analysis["tracks"][0]["band"]["confirmed"] == 1
+    assert client.post(f"/api/jobs/{jid}/render", json={}).status_code == 202
+    job = _wait(client, jid, "done")
+    download = client.get(f"/api/jobs/{jid}/download")
+    assert download.headers["content-type"] == "image/jpeg"
+    assert "IMG_0001-safeframe.jpg" in download.headers["content-disposition"]
+    assert download.content[:2] == b"\xff\xd8"
+
+
+def test_sealed_original_is_written_for_honoured_bands(tmp_path, make_video):
+    from safeframe.seal import TrusteeShare, create_escrow, unseal_file
+
+    public, shares = create_escrow(2, 3)
+    key = tmp_path / "escrow.pub.json"
+    key.write_text(public.to_json())
+    settings = Settings(
+        data_dir=tmp_path / "d",
+        warm_up_models=False,
+        frontend_dist=tmp_path / "x",
+        escrow_public_key=key,
+    )
+    video = make_video()
+    with TestClient(create_app(settings, components=_components)) as client:
+        assert client.get("/api/config").json()["sealing_enabled"]
+        jid = _upload(client, video)["id"]
+        _wait(client, jid, "review")
+        client.post(f"/api/jobs/{jid}/render", json={})
+        job = _wait(client, jid, "done")
+        assert job["sealed_ready"] and job["upload_deleted"]
+        r = client.get(f"/api/jobs/{jid}/sealed")
+        assert r.status_code == 200 and r.content.startswith(b"SFSEAL1")
+        envelope = tmp_path / "e.sfseal"
+        envelope.write_bytes(r.content)
+        restored = tmp_path / "restored.mp4"
+        unseal_file(envelope, [TrusteeShare.from_json(s.to_json()) for s in shares[1:]], restored)
+        assert restored.read_bytes() == video.read_bytes()
+
+        # Keeping the wearer (with their consent) means nothing is hidden: no envelope.
+        jid = _upload(client, video, keep=True)["id"]
+        _wait(client, jid, "review")
+        client.post(f"/api/jobs/{jid}/render", json={"overrides": {"1": "keep"}})
+        assert not _wait(client, jid, "done")["sealed_ready"]
+        assert client.get(f"/api/jobs/{jid}/sealed").status_code == 404
