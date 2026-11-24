@@ -7,6 +7,7 @@ import {
   rasterizeMask,
   regionCoverage,
   regionsAtFrame,
+  type Decision,
   type FrameRegion,
   type IndexedTrack,
   type MaskRaster,
@@ -63,10 +64,13 @@ function useMaskCache() {
   }, []);
 }
 
-const COLORS = {
+const COLORS: Record<Decision | "manual" | "kept", string> = {
+  wearer: "#3e63dd",
+  possible: "#0090ff",
+  not_honoured: "#6f6e77",
   minor: "#e5484d",
   uncertain: "#f5a524",
-  adult: "#30a46c",
+  visible: "#30a46c",
   manual: "#8e4ec6",
   kept: "#30a46c",
 };
@@ -157,7 +161,7 @@ export function VideoStage(props: Props) {
         (r.trackId !== undefined && r.trackId === p.selectedTrack) ||
         (r.kind === "manual" && r.key === `m${p.selectedRegion}`);
       const color =
-        r.kind === "manual" ? COLORS.manual : r.blurred ? COLORS[r.status ?? "minor"] : COLORS.kept;
+        r.kind === "manual" ? COLORS.manual : r.blurred ? COLORS[r.status ?? "wearer"] : COLORS.kept;
       ctx.lineWidth = selected ? 4 : 2;
       ctx.strokeStyle = color;
       ctx.setLineDash(r.interpolated ? [6, 4] : r.blurred ? [] : [2, 3]);

@@ -11,6 +11,10 @@ const config: AppConfig = {
   job_ttl_hours: 24,
   default_threshold: 0.35,
   default_min_face_samples: 3,
+  default_min_band_hits: 1,
+  sealing_enabled: false,
+  seal_retention_days: 30,
+  band_spec_version: 1,
   notice: "Age estimation is probabilistic.",
   intended_use: "SafeFrame is intended to protect children's privacy in video you share.",
 };

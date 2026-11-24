@@ -10,9 +10,11 @@ import type {
   RenderRequest,
 } from "../api/types";
 import {
-  classify,
+  ageMatters,
   formatTime,
   indexTracks,
+  orphanRuns,
+  policyFor,
   sensitivityToThreshold,
   shouldBlur,
   summarise,
@@ -20,6 +22,7 @@ import {
   timeOfFrame,
   type Policy,
 } from "../review/model";
+import { ContextBanner } from "./ContextBanner";
 import { Timeline } from "./Timeline";
 import { TrackList } from "./TrackList";
 import { VideoStage, type ViewMode } from "./VideoStage";
@@ -39,6 +42,9 @@ export function ReviewScreen({ job, config, initial, onRender, onDiscard }: Prop
   const [minFaceSamples, setMinFaceSamples] = useState(
     initial?.min_face_samples ?? config.default_min_face_samples,
   );
+  const [minBandHits, setMinBandHits] = useState(
+    initial?.min_band_hits ?? config.default_min_band_hits,
+  );
   const [overrides, setOverrides] = useState<Record<string, Override>>(initial?.overrides ?? {});
   const [manual, setManual] = useState<ManualRegion[]>(initial?.manual_regions ?? []);
   const [frame, setFrame] = useState(0);
@@ -57,13 +63,19 @@ export function ReviewScreen({ job, config, initial, onRender, onDiscard }: Prop
     api.analysis(job.id).then(setAnalysis, (e: Error) => setLoadError(e.message));
   }, [job.id]);
 
-  const policy: Policy = useMemo(() => ({ threshold, minFaceSamples }), [threshold, minFaceSamples]);
+  const context = analysis?.context ?? job.context;
+  const video = analysis?.video ?? job.video!;
+  const policy: Policy = useMemo(
+    () => policyFor({ video, context }, { threshold, minFaceSamples, minBandHits }),
+    [video, context, threshold, minFaceSamples, minBandHits],
+  );
   const tracks = useMemo(
     () => indexTracks(analysis?.tracks ?? [], analysis?.video),
     [analysis],
   );
   const summary = useMemo(() => summarise(tracks, policy, overrides), [tracks, policy, overrides]);
-  const video = analysis?.video ?? job.video!;
+  const orphans = useMemo(() => orphanRuns(analysis?.orphan_band_frames ?? []), [analysis]);
+  const isPhoto = (video.media ?? job.media) === "photo";
   const lastFrame = Math.max(video.frame_count - 1, 0);
 
   // Flagged segments (anything that will be blurred), for prev/next navigation.
@@ -169,14 +181,11 @@ export function ReviewScreen({ job, config, initial, onRender, onDiscard }: Prop
       }),
     );
 
-  const keptFlagged = tracks.filter(
-    (t) => overrides[t.track_id] === "keep" && classify(t, policy) !== "adult",
-  ).length;
-
-  const exportVideo = async () => {
+  const exportMedia = async () => {
     const request: RenderRequest = {
       threshold,
       min_face_samples: minFaceSamples,
+      min_band_hits: minBandHits,
       overrides,
       manual_regions: manual,
     };
@@ -246,6 +255,7 @@ export function ReviewScreen({ job, config, initial, onRender, onDiscard }: Prop
           videoRef={videoRef}
         />
 
+        {!isPhoto && (
         <div className="transport">
           <button className="btn icon" onClick={togglePlay} aria-label={playing ? "Pause" : "Play"}>
             {playing ? "❚❚" : "▶"}
@@ -267,7 +277,9 @@ export function ReviewScreen({ job, config, initial, onRender, onDiscard }: Prop
             Next flagged ▶
           </button>
         </div>
+        )}
 
+        {!isPhoto && (
         <Timeline
           frameCount={video.frame_count}
           frame={frame}
@@ -282,58 +294,61 @@ export function ReviewScreen({ job, config, initial, onRender, onDiscard }: Prop
           }}
           onSelectTrack={setSelectedTrack}
         />
+        )}
         <p className="legend small muted">
-          <span className="dot minor" /> likely minor <span className="dot uncertain" /> uncertain{" "}
-          <span className="dot kept" /> kept <span className="dot manual" /> manual · dashed outline =
-          interpolated through occlusion · keys: space, ←/→, shift+←/→
+          <span className="dot wearer" /> wearing a band <span className="dot possible" /> possible
+          band
+          {ageMatters(policy) && (
+            <>
+              {" "}
+              <span className="dot not_honoured" /> band not honoured
+            </>
+          )}
+          {policy.protectMinors && (
+            <>
+              {" "}
+              <span className="dot minor" /> likely minor <span className="dot uncertain" /> age
+              uncertain
+            </>
+          )}{" "}
+          <span className="dot kept" /> visible <span className="dot manual" /> manual
+          {!isPhoto && (
+            <>
+              {" "}
+              · ticks = band sightings · dashed outline = interpolated through occlusion · keys:
+              space, ←/→, shift+←/→
+            </>
+          )}
         </p>
         <p className="legend small muted">
-          People are blurred to their silhouette when the model outlined them, and to their whole
-          box on frames without a reliable outline. This preview is drawn over the original video
-          in your browser; only the exported file has the blur baked in.
+          A band only has to be seen once: its wearer is then blurred in every frame they appear
+          in, to their silhouette when the model outlined them and to their whole box otherwise.
+          This preview is drawn over the original in your browser; only the exported file has the
+          blur baked in.
         </p>
       </div>
 
       <aside className="review-side">
-        <div className="panel">
-          <h3>Sensitivity</h3>
-          <input
-            type="range"
-            min={0}
-            max={1}
-            step={0.01}
-            value={thresholdToSensitivity(threshold)}
-            onChange={(e) => setThreshold(sensitivityToThreshold(Number(e.target.value)))}
-            aria-label="Sensitivity"
-          />
-          <div className="range-labels small muted">
-            <span>Fewer blurs</span>
-            <span>More blurs</span>
-          </div>
-          <p className="small">
-            Blur when estimated P(under 18) ≥ <strong>{(threshold * 100).toFixed(0)}%</strong>
-            {threshold !== config.default_threshold && (
-              <>
-                {" "}
-                <button className="link" onClick={() => setThreshold(config.default_threshold)}>
-                  reset
+        <ContextBanner context={context} />
+
+        {orphans.length > 0 && (
+          <div className="panel warn small" role="alert">
+            <strong>A band was seen that couldn’t be matched to anyone.</strong> Someone may have been
+            missed: check{" "}
+            {orphans.slice(0, 3).map(([a], i) => (
+              <span key={a}>
+                {i > 0 && ", "}
+                <button className="link" onClick={() => seek(a)}>
+                  {isPhoto ? "the photo" : formatTime(a / video.fps)}
                 </button>
-              </>
-            )}
-          </p>
-          <details>
-            <summary className="small">Advanced</summary>
-            <label className="small field">
-              Face observations needed before someone can count as an adult
-              <input
-                type="number"
-                min={1}
-                max={100}
-                value={minFaceSamples}
-                onChange={(e) => setMinFaceSamples(Math.max(1, Number(e.target.value) || 1))}
-              />
-            </label>
-          </details>
+              </span>
+            ))}
+            {orphans.length > 3 && <> and {orphans.length - 3} more</>} and add a region if needed.
+          </div>
+        )}
+
+        <div className="panel">
+          <h3>Summary</h3>
           <div className="summary">
             <div>
               <strong>{summary.blurred}</strong>
@@ -341,7 +356,7 @@ export function ReviewScreen({ job, config, initial, onRender, onDiscard }: Prop
             </div>
             <div>
               <strong>{summary.kept}</strong>
-              <span>kept</span>
+              <span>visible</span>
             </div>
             <div>
               <strong>{manual.length}</strong>
@@ -349,9 +364,81 @@ export function ReviewScreen({ job, config, initial, onRender, onDiscard }: Prop
             </div>
           </div>
           <p className="small muted">
-            {summary.minor} likely minor · {summary.uncertain} uncertain · {summary.adult} likely adult
+            {summary.wearer} wearing a band · {summary.possible} possible
+            {ageMatters(policy) && <> · {summary.not_honoured} not honoured</>}
+            {policy.protectMinors && (
+              <>
+                {" "}
+                · {summary.minor} likely minor · {summary.uncertain} age uncertain
+              </>
+            )}{" "}
+            · {summary.visible} without a band
           </p>
+          <details>
+            <summary className="small">Advanced</summary>
+            <label className="small field">
+              Clean band sightings needed to count as a wearer (fewer still blur them as “possible”)
+              <input
+                type="number"
+                min={1}
+                max={100}
+                value={minBandHits}
+                onChange={(e) => setMinBandHits(Math.max(1, Number(e.target.value) || 1))}
+              />
+            </label>
+          </details>
         </div>
+
+        {ageMatters(policy) && (
+          <div className="panel">
+            <h3>Age sensitivity</h3>
+            <p className="small muted">
+              {policy.guarded
+                ? "Here a band protects only someone who looks under 18."
+                : "Event mode blurs anyone who may be under 18, band or not."}
+            </p>
+            <input
+              type="range"
+              min={0}
+              max={1}
+              step={0.01}
+              value={thresholdToSensitivity(threshold)}
+              onChange={(e) => setThreshold(sensitivityToThreshold(Number(e.target.value)))}
+              aria-label="Sensitivity"
+            />
+            <div className="range-labels small muted">
+              <span>Fewer blurs</span>
+              <span>More blurs</span>
+            </div>
+            <p className="small">
+              Treat as under 18 when estimated P(under 18) ≥{" "}
+              <strong>{(threshold * 100).toFixed(0)}%</strong>
+              {threshold !== config.default_threshold && (
+                <>
+                  {" "}
+                  <button className="link" onClick={() => setThreshold(config.default_threshold)}>
+                    reset
+                  </button>
+                </>
+              )}
+            </p>
+            {!isPhoto && (
+              <details>
+                <summary className="small">Advanced</summary>
+                <label className="small field">
+                  Face observations needed before an age estimate counts
+                  <input
+                    type="number"
+                    min={1}
+                    max={100}
+                    value={minFaceSamples}
+                    onChange={(e) => setMinFaceSamples(Math.max(1, Number(e.target.value) || 1))}
+                  />
+                </label>
+              </details>
+            )}
+          </div>
+        )}
 
         <div className="panel">
           <div className="panel-head">
@@ -431,16 +518,29 @@ export function ReviewScreen({ job, config, initial, onRender, onDiscard }: Prop
         </div>
 
         <div className="panel export">
-          {keptFlagged > 0 && (
+          {summary.keptWearers > 0 && (
             <p className="warn small" role="alert">
-              You chose to keep {keptFlagged} {keptFlagged === 1 ? "person" : "people"} SafeFrame
-              flagged as possibly under 18.
+              You chose to show {summary.keptWearers}{" "}
+              {summary.keptWearers === 1 ? "person who is" : "people who are"} wearing a band. Only do
+              this with their consent.
+            </p>
+          )}
+          {summary.keptMinors > 0 && (
+            <p className="warn small" role="alert">
+              You chose to keep {summary.keptMinors}{" "}
+              {summary.keptMinors === 1 ? "person" : "people"} SafeFrame flagged as possibly under 18.
             </p>
           )}
           {submitError && <p className="error small">{submitError}</p>}
-          <button className="btn primary big" onClick={exportVideo} disabled={submitting}>
-            {submitting ? "Starting…" : "Export blurred video"}
+          <button className="btn primary big" onClick={exportMedia} disabled={submitting}>
+            {submitting ? "Starting…" : `Export blurred ${isPhoto ? "photo" : "video"}`}
           </button>
+          {config.sealing_enabled && summary.honoured > 0 && (
+            <p className="small muted">
+              The unblurred original will be sealed for {config.seal_retention_days} days: only a
+              quorum of independent trustees can open it, for example on a court order.
+            </p>
+          )}
           <p className="small muted">
             {job.keep_upload
               ? "Your original will be kept so you can export again."
