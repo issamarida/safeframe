@@ -40,19 +40,34 @@ export const api = {
   previewUrl: (id: string) => `${BASE}/jobs/${id}/preview`,
   thumbnailUrl: (id: string, trackId: number) => `${BASE}/jobs/${id}/tracks/${trackId}/thumbnail`,
   downloadUrl: (id: string) => `${BASE}/jobs/${id}/download`,
+  sealedUrl: (id: string) => `${BASE}/jobs/${id}/sealed`,
+  bandSheetUrl: () => `${BASE}/band.svg`,
 };
+
+export interface UploadOptions {
+  keepUpload: boolean;
+  /** Declare the capture was taken in a guarded place (can only make rules stricter). */
+  guarded: boolean;
+  /** Event mode: also blur anyone who may be under 18. */
+  protectMinors: boolean;
+}
 
 /**
  * Upload with progress. XHR is used because fetch() cannot report upload
  * progress. The body is sent raw (not multipart) and streamed to disk server-side.
  */
-export function uploadVideo(
+export function uploadMedia(
   file: File,
-  keepUpload: boolean,
+  options: UploadOptions,
   onProgress: (fraction: number) => void,
 ): { promise: Promise<Job>; abort: () => void } {
   const xhr = new XMLHttpRequest();
-  const params = new URLSearchParams({ filename: file.name, keep_upload: String(keepUpload) });
+  const params = new URLSearchParams({
+    filename: file.name,
+    keep_upload: String(options.keepUpload),
+    guarded: String(options.guarded),
+    protect_minors: String(options.protectMinors),
+  });
   const promise = new Promise<Job>((resolve, reject) => {
     xhr.open("POST", `${BASE}/jobs?${params}`);
     xhr.setRequestHeader("Content-Type", "application/octet-stream");

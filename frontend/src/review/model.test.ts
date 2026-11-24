@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { MaskRow, Rect, TrackData } from "../api/types";
+import type { BandData, MaskRow, Rect, TrackData } from "../api/types";
 import {
   MaskBudget,
   paddedRect,
@@ -10,16 +10,42 @@ import {
   frameAtTime,
   indexTracks,
   normaliseRect,
+  orphanRuns,
+  policyFor,
   regionsAtFrame,
   sensitivityToThreshold,
   shouldBlur,
   summarise,
   timeOfFrame,
+  type Decision,
+  type Policy,
 } from "./model";
 
-const policy = { threshold: 0.35, minFaceSamples: 3 };
+const policy: Policy = {
+  threshold: 0.35,
+  minFaceSamples: 3,
+  minBandHits: 1,
+  guarded: false,
+  protectMinors: false,
+};
 
-function track(id: number, p: number | null, samples: number, frames = [0, 1, 2]): TrackData {
+function band(clean: number, ambiguous = 0): BandData {
+  return {
+    confirmed: clean,
+    possible: ambiguous,
+    first_frame: clean + ambiguous > 0 ? 0 : null,
+    via: { wrist: clean, body: 0, box: 0 },
+    hits: [],
+  };
+}
+
+function track(
+  id: number,
+  p: number | null,
+  samples: number,
+  frames = [0, 1, 2],
+  bandData?: BandData,
+): TrackData {
   return {
     track_id: id,
     first_frame: frames[0]!,
@@ -29,25 +55,70 @@ function track(id: number, p: number | null, samples: number, frames = [0, 1, 2]
     face_samples: samples,
     peak_confidence: 0.9,
     boxes: frames.map((f) => [f, 10, 10, 50, 90, 0]),
+    ...(bandData ? { band: bandData } : {}),
   };
 }
 
-describe("policy (mirrors backend)", () => {
-  it("treats too little face evidence as uncertain, and blurs it", () => {
-    const t = track(1, 0.01, 2);
-    expect(classify(t, policy)).toBe("uncertain");
-    expect(shouldBlur(t, policy)).toBe(true);
+const CHILD: [number, number] = [0.9, 3];
+const ADULT: [number, number] = [0.05, 3];
+const NO_FACE: [null, number] = [null, 0];
+
+describe("policy (mirrors backend tests/test_policy.py)", () => {
+  // [band, age, guarded, event mode, expected]
+  const matrix: [("clean" | "ambiguous" | null), [number | null, number], boolean, boolean, Decision][] = [
+    // Standard capture: the band alone decides, age is irrelevant.
+    ["clean", ADULT, false, false, "wearer"],
+    ["clean", NO_FACE, false, false, "wearer"],
+    ["ambiguous", ADULT, false, false, "possible"],
+    [null, CHILD, false, false, "visible"],
+    [null, NO_FACE, false, false, "visible"],
+    // Guarded zone: only positive evidence of a child keeps the protection.
+    ["clean", CHILD, true, false, "wearer"],
+    ["ambiguous", CHILD, true, false, "possible"],
+    ["clean", ADULT, true, false, "not_honoured"],
+    ["clean", NO_FACE, true, false, "not_honoured"], // masked robber
+    [null, CHILD, true, false, "visible"],
+    // Event mode: likely minors and uncertain people too, fail closed...
+    [null, CHILD, false, true, "minor"],
+    [null, NO_FACE, false, true, "uncertain"],
+    [null, ADULT, false, true, "visible"],
+    ["clean", ADULT, false, true, "wearer"],
+    // ...except in guarded zones, where "uncertain" protects nobody.
+    [null, NO_FACE, true, true, "visible"],
+    [null, CHILD, true, true, "minor"],
+    ["clean", ADULT, true, true, "not_honoured"],
+  ];
+
+  it.each(matrix)("band=%s age=%j guarded=%s event=%s -> %s", (b, [p, n], guarded, event, expected) => {
+    const bandData = b === "clean" ? band(1) : b === "ambiguous" ? band(0, 1) : undefined;
+    const t = track(1, p, n, [0, 1, 2], bandData);
+    const pol = { ...policy, guarded, protectMinors: event };
+    expect(classify(t, pol)).toBe(expected);
+    expect(shouldBlur(t, pol)).toBe(["wearer", "possible", "minor", "uncertain"].includes(expected));
   });
 
-  it("splits minors and adults at the threshold", () => {
-    expect(classify(track(1, 0.35, 5), policy)).toBe("minor");
-    expect(classify(track(1, 0.34, 5), policy)).toBe("adult");
-    expect(shouldBlur(track(1, 0.1, 5), policy)).toBe(false);
+  it("still protects someone with too few clean sightings", () => {
+    const t = track(1, null, 0, [0], band(1));
+    expect(classify(t, { ...policy, minBandHits: 2 })).toBe("possible");
+    expect(shouldBlur(t, { ...policy, minBandHits: 2 })).toBe(true);
+  });
+
+  it("treats legacy analyses without band data as no band", () => {
+    expect(classify(track(1, 0.9, 5), policy)).toBe("visible");
   });
 
   it("lets reviewer overrides win", () => {
     expect(shouldBlur(track(1, 0.0, 9), policy, "blur")).toBe(true);
-    expect(shouldBlur(track(1, 1.0, 9), policy, "keep")).toBe(false);
+    expect(shouldBlur(track(1, null, 0, [0], band(3)), policy, "keep")).toBe(false);
+  });
+
+  it("locks the capture context in and needs one face in a photo", () => {
+    const tuning = { threshold: 0.35, minFaceSamples: 3, minBandHits: 1 };
+    const video = { width: 1, height: 1, fps: 1, fps_rational: "1/1", frame_count: 1, duration: 1, has_audio: false };
+    const photo = policyFor({ video: { ...video, media: "photo" }, context: { guarded: true } }, tuning);
+    expect(photo).toMatchObject({ guarded: true, protectMinors: false, minFaceSamples: 1 });
+    expect(classify(track(1, 0.8, 1, [0], band(1)), photo)).toBe("wearer");
+    expect(policyFor({ video, context: undefined }, tuning).minFaceSamples).toBe(3);
   });
 
   it("maps sensitivity to threshold", () => {
@@ -68,7 +139,7 @@ describe("frame timing", () => {
 });
 
 describe("regionsAtFrame", () => {
-  const tracks = indexTracks([track(1, 0.9, 5, [0, 1]), track(2, 0.05, 5, [1, 2])]);
+  const tracks = indexTracks([track(1, null, 0, [0, 1], band(2)), track(2, 0.05, 5, [1, 2])]);
   const manual = [{ region_id: "a", start_frame: 2, end_frame: 4, box: [0, 0, 5, 5] as const }];
 
   it("reports tracks and manual regions present on a frame", () => {
@@ -86,14 +157,41 @@ describe("regionsAtFrame", () => {
     ]);
   });
 
-  it("summarises decisions", () => {
-    expect(summarise(tracks, policy, {})).toEqual({
-      minor: 1,
-      adult: 1,
-      uncertain: 0,
+  it("reports each region's decision", () => {
+    expect(regionsAtFrame(1, tracks, policy, {}, []).map((r) => r.status)).toEqual([
+      "wearer",
+      "visible",
+    ]);
+  });
+
+  it("summarises decisions and flags wearers the reviewer kept", () => {
+    expect(summarise(tracks, policy, {})).toMatchObject({
+      wearer: 1,
+      visible: 1,
       blurred: 1,
       kept: 1,
+      honoured: 1,
+      keptWearers: 0,
     });
+    expect(summarise(tracks, policy, { 1: "keep" })).toMatchObject({
+      blurred: 0,
+      honoured: 0,
+      keptWearers: 1,
+      keptMinors: 0,
+    });
+    // An explicit blur on a wearer still honours their band (the original gets sealed).
+    expect(summarise(tracks, policy, { 1: "blur" }).honoured).toBe(1);
+  });
+});
+
+describe("orphanRuns", () => {
+  it("groups nearby frames into runs", () => {
+    expect(orphanRuns([30, 2, 0, 4, 31, 90])).toEqual([
+      [0, 4],
+      [30, 31],
+      [90, 90],
+    ]);
+    expect(orphanRuns([])).toEqual([]);
   });
 });
 

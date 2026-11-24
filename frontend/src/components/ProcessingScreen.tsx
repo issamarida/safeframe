@@ -10,7 +10,7 @@ interface Props {
   onCancel: () => void;
 }
 
-const STEPS = ["Preparing preview", "Loading models", "Detecting, tracking and estimating age"];
+const STEPS = ["Preparing preview", "Loading models", "Finding people and SafeFrame Bands"];
 
 export function ProcessingScreen({ job, onUpdate, onCancel }: Props) {
   const [error, setError] = useState<string | null>(null);
@@ -30,7 +30,7 @@ export function ProcessingScreen({ job, onUpdate, onCancel }: Props) {
   return (
     <section className="card processing">
       <h2>Analysing “{job.filename}”</h2>
-      {job.video && (
+      {job.video && job.media !== "photo" && (
         <p className="muted">
           {job.video.width}×{job.video.height} · {job.video.fps.toFixed(2)} fps ·{" "}
           {formatTime(job.video.duration)} · {job.video.frame_count} frames

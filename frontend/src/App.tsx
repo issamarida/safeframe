@@ -79,6 +79,7 @@ export default function App() {
     screen = (
       <ExportScreen
         job={job}
+        config={config}
         onUpdate={setJob}
         onBackToReview={() => setJob({ ...job, state: "review" })}
         onDelete={deleteJob}
@@ -104,12 +105,12 @@ export default function App() {
           <img src="/favicon.svg" alt="" width={28} height={28} />
           <span>SafeFrame</span>
         </div>
-        <span className="tagline">Protect children's privacy in the videos you share</span>
+        <span className="tagline">Respect people who asked not to be shown</span>
       </header>
       {config && <Notice config={config} />}
       <main>{screen}</main>
       <footer className="footer muted">
-        Videos are processed on this server only and deleted automatically.
+        Photos and videos are processed on this server only and deleted automatically.
         {config && <> SafeFrame v{config.version}.</>}
       </footer>
     </div>

@@ -4,24 +4,85 @@
  * `classify` and `shouldBlur` mirror backend/src/safeframe/pipeline/policy.py
  * exactly: the preview must show what the export will contain.
  */
-import type { ManualRegion, MaskRow, Override, Rect, TrackData } from "../api/types";
+import type { AnalysisData, ManualRegion, MaskRow, Override, Rect, TrackData } from "../api/types";
 
-export type TrackStatus = "minor" | "adult" | "uncertain";
+export type AgeStatus = "minor" | "adult" | "uncertain";
+
+/** Mirrors policy.Decision. */
+export type Decision = "wearer" | "possible" | "not_honoured" | "minor" | "uncertain" | "visible";
+
+export const BLURRED_DECISIONS: ReadonlySet<Decision> = new Set([
+  "wearer",
+  "possible",
+  "minor",
+  "uncertain",
+]);
+
+/** Decisions for people who asked (with a band) not to be shown. */
+export const BAND_DECISIONS: ReadonlySet<Decision> = new Set(["wearer", "possible"]);
 
 export interface Policy {
   threshold: number;
   minFaceSamples: number;
+  minBandHits: number;
+  /** Captured in a guarded place: a band protects only someone who looks under 18. */
+  guarded: boolean;
+  /** Event mode: also protect anyone who may be under 18. */
+  protectMinors: boolean;
 }
 
-export function classify(track: TrackData, policy: Policy): TrackStatus {
+export interface Tuning {
+  threshold: number;
+  minFaceSamples: number;
+  minBandHits: number;
+}
+
+/**
+ * The policy for an analysis with its capture context locked in, like
+ * DecisionPolicy.for_analysis: a photo has one frame, so one usable face is
+ * all the age evidence it can have.
+ */
+export function policyFor(analysis: Pick<AnalysisData, "video" | "context">, t: Tuning): Policy {
+  return {
+    ...t,
+    minFaceSamples: analysis.video.media === "photo" ? 1 : t.minFaceSamples,
+    guarded: !!analysis.context?.guarded,
+    protectMinors: !!analysis.context?.protect_minors,
+  };
+}
+
+/** Whether anyone's age can change a decision under this policy. */
+export const ageMatters = (policy: Policy) => policy.guarded || policy.protectMinors;
+
+export function ageStatus(track: TrackData, policy: Policy): AgeStatus {
   if (track.face_samples < policy.minFaceSamples || track.p_minor === null) return "uncertain";
   return track.p_minor >= policy.threshold ? "minor" : "adult";
+}
+
+export function bandDecision(track: TrackData, policy: Policy): Decision | null {
+  const band = track.band;
+  if (!band) return null;
+  if (band.confirmed >= policy.minBandHits) return "wearer";
+  if (band.confirmed + band.possible > 0) return "possible";
+  return null;
+}
+
+export function classify(track: TrackData, policy: Policy): Decision {
+  const band = bandDecision(track, policy);
+  if (band && !policy.guarded) return band;
+  const age = ageMatters(policy) ? ageStatus(track, policy) : null;
+  if (band) return age === "minor" ? band : "not_honoured";
+  if (policy.protectMinors) {
+    if (age === "minor") return "minor";
+    if (age === "uncertain" && !policy.guarded) return "uncertain";
+  }
+  return "visible";
 }
 
 export function shouldBlur(track: TrackData, policy: Policy, override?: Override): boolean {
   if (override === "blur") return true;
   if (override === "keep") return false;
-  return classify(track, policy) !== "adult";
+  return BLURRED_DECISIONS.has(classify(track, policy));
 }
 
 /** Sensitivity is the user-facing inverse of the P(under 18) threshold. */
@@ -254,7 +315,7 @@ export interface FrameRegion {
   rect: Rect;
   blurred: boolean;
   kind: "track" | "manual";
-  status?: TrackStatus;
+  status?: Decision;
   trackId?: number;
   interpolated?: boolean;
   /** Silhouette for this frame; absent means the padded box is the coverage. */
@@ -293,26 +354,59 @@ export function regionsAtFrame(
   return out;
 }
 
-export interface Summary {
-  minor: number;
-  adult: number;
-  uncertain: number;
+export type Summary = Record<Decision, number> & {
   blurred: number;
   kept: number;
-}
+  /** Blurred because of their band (what makes the backend seal the original). */
+  honoured: number;
+  /** Band wearers (or possible wearers) the reviewer chose to keep visible. */
+  keptWearers: number;
+  /** Event-mode minors or uncertain people the reviewer chose to keep visible. */
+  keptMinors: number;
+};
 
 export function summarise(
   tracks: TrackData[],
   policy: Policy,
   overrides: Record<string, Override>,
 ): Summary {
-  const s: Summary = { minor: 0, adult: 0, uncertain: 0, blurred: 0, kept: 0 };
+  const s: Summary = {
+    wearer: 0,
+    possible: 0,
+    not_honoured: 0,
+    minor: 0,
+    uncertain: 0,
+    visible: 0,
+    blurred: 0,
+    kept: 0,
+    honoured: 0,
+    keptWearers: 0,
+    keptMinors: 0,
+  };
   for (const t of tracks) {
-    s[classify(t, policy)] += 1;
-    if (shouldBlur(t, policy, overrides[t.track_id])) s.blurred += 1;
-    else s.kept += 1;
+    const decision = classify(t, policy);
+    s[decision] += 1;
+    if (shouldBlur(t, policy, overrides[t.track_id])) {
+      s.blurred += 1;
+      if (BAND_DECISIONS.has(decision)) s.honoured += 1;
+    } else {
+      s.kept += 1;
+      if (BAND_DECISIONS.has(decision)) s.keptWearers += 1;
+      else if (BLURRED_DECISIONS.has(decision)) s.keptMinors += 1;
+    }
   }
   return s;
+}
+
+/** Group the frames of unattributed band sightings into [first, last] runs. */
+export function orphanRuns(frames: number[], gap = 5): [number, number][] {
+  const runs: [number, number][] = [];
+  for (const f of [...frames].sort((a, b) => a - b)) {
+    const last = runs[runs.length - 1];
+    if (last && f - last[1] <= gap) last[1] = f;
+    else runs.push([f, f]);
+  }
+  return runs;
 }
 
 /** Normalise a dragged rectangle (any corner order) and clamp it to the frame. */

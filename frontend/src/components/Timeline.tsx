@@ -51,13 +51,26 @@ export const Timeline = memo(function Timeline(props: Props) {
             <div
               className={`seg ${blurred ? status : "kept"}${props.selectedTrack === t.track_id ? " selected" : ""}`}
               style={{ left: pct(t.first_frame), width: width(t.first_frame, t.last_frame) }}
-              title={`Person #${t.track_id} · ${blurred ? "blurred" : "kept"} (${status})`}
+              title={`Person #${t.track_id} · ${blurred ? "blurred" : "kept"} (${status.replace("_", " ")})`}
               onPointerDown={(e) => {
                 e.stopPropagation();
                 props.onSelectTrack(t.track_id);
                 onSeek(t.first_frame);
               }}
             />
+            {t.band?.hits.map(([f, , ambiguous]) => (
+              <div
+                key={f}
+                className={`band-tick${ambiguous ? " ambiguous" : ""}`}
+                style={{ left: pct(f) }}
+                title={`Band seen at frame ${f}${ambiguous ? " (ambiguous)" : ""}`}
+                onPointerDown={(e) => {
+                  e.stopPropagation();
+                  props.onSelectTrack(t.track_id);
+                  onSeek(f);
+                }}
+              />
+            ))}
           </div>
         );
       })}
